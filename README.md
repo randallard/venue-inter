@@ -1,70 +1,115 @@
 # VenueInter — Venue Audience Management System
 
-A fullstack Rust application for managing venue audience participants, built with
-[Dioxus](https://dioxuslabs.com/) 0.7 (transitioning to SvelteKit — see
-[migration/](migration/)) and backed by IBM Informix.
+A fullstack application for managing venue audience participants. Backend is
+Rust/Axum backed by IBM Informix (participant data) and PostgreSQL (app workflow).
+Frontend is SvelteKit + TypeScript. See [migration/](migration/) for the
+phase-by-phase build plan.
 
 VenueInter manages audience participant pools: corporate loads participant data
 every two years, staff creates pools for upcoming shows, draws eligible
 participants, tracks eligibility questionnaires, and routes excuse/disqualification
 cases through an admin → CEO review workflow.
 
-## Migration Story
-
-This project is the **proof-of-concept for the juryinter migration**. The current
-phase bridges the existing Informix database while the SvelteKit frontend is built
-out phase by phase. See [migration/PLAN.md](migration/PLAN.md) for the full plan.
-
 ## Architecture
-
-Cargo workspace with three crates:
 
 ```
 crates/
-  app/           # Dioxus fullstack entry point (SSR + WASM hydration) — being replaced
-  server/        # Backend logic: auth (OIDC), database (Informix ODBC), API handlers
-  shared-types/  # Models shared between app and server
+  app/           # Axum server entry point (Dioxus fullstack shell; serves the SvelteKit build)
+  server/        # Backend: auth (OIDC), Informix ODBC, PostgreSQL, API handlers, reviews
+  shared-types/  # Serde models shared between crates
+
+frontend/        # SvelteKit 2 + Svelte 5 + TypeScript — the actual UI
+ifx-config/      # Informix schema + seed data for the dev container
+migrations/      # PostgreSQL init schema (init.sql)
+migration/       # Phase-by-phase build plan (Markdown specs)
 ```
 
-- **Frontend**: Dioxus 0.7 (transitioning to SvelteKit + TypeScript)
-- **Backend**: Axum 0.8 with custom routes merged into the Dioxus router
-- **Auth**: OpenID Connect via Authentik; group-based RBAC (`ceo-review` group for narrow CEO view)
-- **Informix Database**: Participant data via ODBC (odbc-api crate, requires IBM CSDK)
-- **PostgreSQL Database**: Tasks, tickets, CEO review queue (`status_reviews`), sessions
-- **Email**: Optional SMTP failure notifications via lettre
+- **Frontend**: SvelteKit 2 / Svelte 5 / TypeScript (strict), served at `:5173` in dev (Vite proxy to `:8080`)
+- **Backend**: Axum 0.8, served at `:8080`
+- **Auth**: OpenID Connect via Authentik; group-based RBAC
+- **Informix**: All domain data (participant, pool, pool_member, review_record) via ODBC (odbc-api crate, requires IBM CSDK)
+- **PostgreSQL**: App-local state — tasks, tickets, CEO review queue, sessions, sync queue
 
 ## Role System
 
 | Group | Access |
 |---|---|
-| `users` | Standard access — all sections |
-| `helpdesk` | Standard + all tickets |
-| `ceo-review` | **Narrow view only** — CEO review queue (`/reviews/ceo`) after admin sends prepped cases |
+| `users` | Full admin access — dashboard, pools, reviews, reports, data browser |
+| `helpdesk` | Standard access + all tickets |
+| `ceo-review` | **Narrow view only** — CEO review queue (`/reviews/ceo`); no other nav |
+
+## What's Built
+
+| Phase | Status | Description |
+|---|---|---|
+| 1 — Foundation | Done | Auth (OIDC + session), data browser (YAML-configured queries), participant/pool/staff views |
+| 2 — Dashboard | Done | 5-card status dashboard: bad show codes, blank questionnaires, portal lockouts, sync pending/failed; inline fix flows |
+| 5 — CEO Review | Done | Admin queues → send to CEO → CEO decision (async PG write, Informix via sync queue); full audit trail |
+| 3 — Pool Mgmt | Planned | Pool creation, draw, status management |
+| 4 — Questionnaires | Planned | Questionnaire tracking and reporting |
+| 6 — Reports | Planned | Reporting and exports |
+| 7 — Background | Planned | `informix_sync_queue` cron, replace_staff task |
+
+## CEO Review Flow
+
+1. Admin opens an excuse/disqualification request from the admin queue
+2. Admin adds notes and clicks **Send to CEO** — record moves to `status_reviews` (PG, status=`pending_ceo`), Informix `review_record` status set to `S`
+3. CEO sees only the prepared queue at `/reviews/ceo`
+4. CEO enters notes and clicks a decision button (**Re-qualify / Disqualify / Perm Excuse / Temp Excuse / Send Back**)
+5. Decision writes to PostgreSQL in a single transaction (fast, ~1–5 ms) — decision is durable on commit
+6. Two `informix_sync_queue` rows are inserted (async); a cron job (Phase 7) applies them to Informix via ODBC
+
+**Durability guarantee**: if the browser times out after a click, the page re-fetches before surfacing an error. If the PG transaction already committed, the browser treats it as success.
+
+## Informix Schema (`ifx-config/seed.sql`)
+
+| Table | Description |
+|---|---|
+| `participant` | Audience list — corporate-loaded every 2 years |
+| `pool` | Draw group for a specific show |
+| `pool_member` | Participant status in a pool (1=summoned, 2=qualified, 5=perm excuse, 6=disqualified, 7=temp excuse) |
+| `show`, `show_type`, `venue` | Show and venue reference data |
+| `part_history` | Informix-side status change audit trail |
+| `review_record` | Pending excuse / disqualification records (status P/S/C) |
+| `session_resources` | Pool session staff assignments |
+| `staff_codes` | Staff code lookup table |
+
+## PostgreSQL Schema (`migrations/init.sql`)
+
+| Table | Description |
+|---|---|
+| `tasks` | Background task tracking (e.g. replace_staff) |
+| `tickets` | Failure tickets — auto-created when sync queue items exhaust retries |
+| `status_reviews` | CEO review queue; `part_key` (unique) links to Informix `part_no_pool_no` |
+| `review_history` | Full audit trail of every review action (sent_to_ceo, decided, sent_back) |
+| `app_config` | Feature flags — `ceo_review_state` = `live` \| `maintenance` |
+| `informix_sync_queue` | Deferred writes back to Informix; operations: `update_pool_member_status`, `close_review_record`, `reopen_review_record` |
+| `tower_sessions` | Persistent session store (auto-created at startup by sqlx) |
 
 ## Docker Compose Services
 
-| Service | Image | Port | Purpose |
-|---|---|---|---|
-| `informix-dev` | `icr.io/informix/informix-developer-database` | 9088 | Informix with participant seed data |
-| `venueinter-db` | `postgres:16-alpine` | 5433 | App PostgreSQL — tasks, tickets, reviews, sessions |
-| `authentik-server` | `ghcr.io/goauthentik/server:2025.10` | 9000, 9443 | OIDC provider |
-| `authentik-worker` | `ghcr.io/goauthentik/server:2025.10` | — | Authentik background worker |
-| `authentik-db` | `postgres:16-alpine` | — | Authentik backing store |
-| `venueinter` | Built from `Dockerfile` | 8080 | The Dioxus application |
+| Service | Port | Purpose |
+|---|---|---|
+| `informix-dev` | 9088 | Informix with participant seed data |
+| `venueinter-db` | 5433 | App PostgreSQL |
+| `authentik-server` | 9000, 9443 | OIDC provider |
+| `authentik-worker` | — | Authentik background worker |
+| `authentik-db` | — | Authentik backing store |
+| `venueinter` | 8080 | Rust backend (Axum) |
 
 ## Getting Started
 
-See **[docs/dev-setup.md](docs/dev-setup.md)** for the full local development
-guide.
+See **[docs/dev-setup.md](docs/dev-setup.md)** for the full guide including CSDK setup and Authentik configuration.
 
-**Quick start** (Docker only):
+**Quick start:**
 
 ```bash
 cp .env.example .env
-docker compose up --build
+docker compose up --build        # starts Informix, PostgreSQL, Authentik, and the backend
+cd frontend && pnpm install && pnpm dev   # SvelteKit dev server at :5173
 ```
 
-Visit http://localhost:8080. Informix takes ~90 s on first start.
+Informix takes ~90 s on first start. Visit http://localhost:5173.
 
 ### Dev credentials
 
@@ -74,32 +119,24 @@ Visit http://localhost:8080. Informix takes ~90 s on first start.
 | CEO (review only) | `ceouser` | `dev-password` |
 | Authentik admin | `akadmin` | `dev-admin-password` |
 
-## Informix Schema (`ifx-config/seed.sql`)
+### Running without Docker (backend only)
 
-- `participant` — audience list (corporate-loaded every 2 years)
-- `pool` — draw group for a specific show
-- `pool_member` — participant status in a pool (status 1/2/5/6/7)
-- `show`, `show_type`, `venue` — show and venue reference data
-- `part_history` — status change audit trail
-- `review_record` — pending excuse / disqualification records
+```bash
+cargo run -p app          # backend at :8080
+cd frontend && pnpm dev   # frontend at :5173
+```
 
-## PostgreSQL Schema (`migrations/init.sql`)
-
-- `tasks` — background task tracking
-- `tickets` — failure tickets
-- `status_reviews` — CEO review queue (admin sends prepped cases; CEO decides)
-- `review_history` — full audit trail of review actions
-- `app_config` — feature flags (CEO review live/maintenance state)
-- `tower_sessions` — persistent session store (auto-created at startup)
+Requires Informix CSDK installed and `INFORMIX_*` env vars set. Set `COOKIE_SECURE=false` for local HTTP.
 
 ## Security
 
-FISMA High controls:
+FISMA controls applied:
 
-- OIDC authorization code flow with PKCE + CSRF
-- PostgreSQL-backed sessions; `SameSite=Strict`, `HttpOnly`, `__Host-` prefix; 8-hour timeout
-- Auth routes rate-limited (2 req/s per IP, burst 5)
-- Structured audit logging under `audit` tracing target
-- Security headers on all responses
+- OIDC authorization code flow with Authentik
+- PostgreSQL-backed sessions — `SameSite=Strict`, `HttpOnly`, `__Host-` cookie prefix, 8-hour inactivity timeout
+- Auth routes rate-limited: 2 req/s per IP, burst 5 (tower-governor)
 - `Cache-Control: no-store` on all protected API responses
-- Group-based RBAC via OIDC claims
+- Security headers on every response: `X-Content-Type-Options`, `X-Frame-Options: DENY`, `Strict-Transport-Security`, `Referrer-Policy`, `Permissions-Policy`
+- Structured audit logging via `tracing` under the `audit` target
+- Group-based RBAC enforced in middleware and per-handler
+- CEO decision is a single PostgreSQL transaction — decision is WAL-durable on commit, never lost to a network failure
