@@ -1,0 +1,62 @@
+links:
+  - name: Participants
+    slug: participants
+    master:
+      query: "SELECT part_no, lname, fname, city, state, active FROM participant ORDER BY lname, fname"
+      columns:
+        - { field: part_no, label: "Part No", link_to_detail: true }
+        - { field: lname, label: "Last Name" }
+        - { field: fname, label: "First Name" }
+        - { field: city, label: "City" }
+        - { field: state, label: "State" }
+        - { field: active, label: "Active" }
+      page_size: 50
+    detail:
+      query: "SELECT pm.pool_no, pm.status, pm.rand_nbr, pm.responded FROM pool_member pm WHERE pm.part_no = :id"
+      id_field: part_no
+      columns:
+        - { field: pool_no, label: "Pool No" }
+        - { field: status, label: "Status" }
+        - { field: rand_nbr, label: "Rand No" }
+        - { field: responded, label: "Responded" }
+
+  - name: Pools
+    slug: pools
+    master:
+      query: "SELECT pool_no, ret_date, div_code, office FROM pool ORDER BY ret_date DESC"
+      columns:
+        - { field: pool_no, label: "Pool No", link_to_detail: true }
+        - { field: ret_date, label: "Return Date" }
+        - { field: div_code, label: "Division" }
+        - { field: office, label: "Office" }
+      page_size: 50
+    detail:
+      query: "SELECT pm.pm_id, p.lname, p.fname, pm.status FROM pool_member pm JOIN participant p ON pm.part_no = p.part_no WHERE pm.pool_no = :id ORDER BY p.lname, p.fname"
+      id_field: pool_no
+      columns:
+        - { field: pm_id, label: "Member ID" }
+        - { field: lname, label: "Last Name" }
+        - { field: fname, label: "First Name" }
+        - { field: status, label: "Status" }
+
+  - name: Review Records
+    slug: review_records
+    master:
+      query: "SELECT rr_id, part_no, pool_no, review_type, status FROM review_record ORDER BY rr_id DESC"
+      columns:
+        - { field: rr_id, label: "Record ID", link_to_detail: true }
+        - { field: part_no, label: "Part No" }
+        - { field: pool_no, label: "Pool No" }
+        - { field: review_type, label: "Type" }
+        - { field: status, label: "Status" }
+      page_size: 50
+    detail:
+      query: "SELECT rr_id, part_no, pool_no, review_type, status, notes FROM review_record WHERE rr_id = :id"
+      id_field: rr_id
+      columns:
+        - { field: rr_id, label: "Record ID" }
+        - { field: part_no, label: "Part No" }
+        - { field: pool_no, label: "Pool No" }
+        - { field: review_type, label: "Type" }
+        - { field: status, label: "Status" }
+        - { field: notes, label: "Notes" }

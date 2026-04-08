@@ -1,0 +1,3 @@
+informix	onsoctcp	informix-dev	9088
+informix_dr	drsoctcp	informix-dev	9089
+ifx_dev	onsoctcp	informix-dev	9088

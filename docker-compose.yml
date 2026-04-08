@@ -1,0 +1,162 @@
+services:
+  # ---------------------------------------------------------------------------
+  # Legacy Informix database (dev instance with synthetic participant data)
+  # ---------------------------------------------------------------------------
+  informix-dev:
+    image: icr.io/informix/informix-developer-database:latest
+    container_name: informix-dev
+    hostname: informix-dev
+    privileged: true
+    environment:
+      LICENSE: "accept"
+      SIZE: "small"
+      TYPE: "oltp"
+      STORAGE: "local"
+      DBSERVERNAME: "informix"
+      SQLHOSTS_FILE: "sqlhosts"
+      RUN_FILE_POST_INIT: "setup.sh"
+    ports:
+      - "9088:9088"
+    volumes:
+      - ./ifx-config:/opt/ibm/config
+      - venue-ifx-data:/opt/ibm/data
+    healthcheck:
+      test: ["CMD-SHELL", "INFORMIXDIR=/opt/ibm/informix INFORMIXSERVER=informix /opt/ibm/informix/bin/onstat -l > /dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 90s
+
+  # ---------------------------------------------------------------------------
+  # Application PostgreSQL (tasks, tickets, status reviews, sessions)
+  # ---------------------------------------------------------------------------
+  venueinter-db:
+    image: postgres:16-alpine
+    container_name: venueinter-db
+    environment:
+      POSTGRES_PASSWORD: ${VENUEINTER_DB_PASS:-venueinter-dev-password}
+      POSTGRES_USER: venueinter
+      POSTGRES_DB: venueinter
+    ports:
+      - "5433:5432"
+    volumes:
+      - venueinter-db-data:/var/lib/postgresql/data
+      - ./migrations/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -d venueinter -U venueinter"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # ---------------------------------------------------------------------------
+  # Dioxus fullstack application (to be replaced by SvelteKit — see migration/)
+  # ---------------------------------------------------------------------------
+  venueinter:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      network: host
+    depends_on:
+      informix-dev:
+        condition: service_healthy
+      authentik-server:
+        condition: service_healthy
+      venueinter-db:
+        condition: service_healthy
+    network_mode: host
+    env_file:
+      - .env
+    environment:
+      - INFORMIX_DSN=venueinter_dev
+      - INFORMIX_USER=informix
+      - INFORMIX_PASSWORD=in4mix
+      - INFORMIXSERVER=informix
+      - APP_PORT=8080
+      - RUST_LOG=info
+      - IP=0.0.0.0
+      - PORT=8080
+      - OIDC_ISSUER_URL=http://localhost:9000/application/o/venueinter/
+      - OIDC_CLIENT_ID=${OIDC_CLIENT_ID:-venueinter-dev-client-id}
+      - OIDC_CLIENT_SECRET=${OIDC_CLIENT_SECRET:-venueinter-dev-client-secret}
+      - OIDC_REDIRECT_URI=http://localhost:8080/auth/callback
+      - DATABASE_URL=postgres://venueinter:${VENUEINTER_DB_PASS:-venueinter-dev-password}@localhost:5433/venueinter
+      - SMTP_HOST=${SMTP_HOST:-}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - SMTP_USER=${SMTP_USER:-}
+      - SMTP_PASSWORD=${SMTP_PASSWORD:-}
+      - SMTP_FROM=${SMTP_FROM:-noreply@localhost}
+      - SYSADMIN_EMAIL=${SYSADMIN_EMAIL:-admin@localhost}
+
+  # ---------------------------------------------------------------------------
+  # Authentik (local OIDC identity provider for dev)
+  # ---------------------------------------------------------------------------
+  authentik-db:
+    image: postgres:16-alpine
+    container_name: authentik-db
+    environment:
+      POSTGRES_PASSWORD: ${PG_PASS:-authentik-dev-password}
+      POSTGRES_USER: authentik
+      POSTGRES_DB: authentik
+    volumes:
+      - authentik-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -d authentik -U authentik"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  authentik-server:
+    image: ghcr.io/goauthentik/server:2025.10
+    container_name: authentik-server
+    command: server
+    environment:
+      AUTHENTIK_SECRET_KEY: ${AUTHENTIK_SECRET_KEY:-dev-secret-key-change-in-production}
+      AUTHENTIK_BOOTSTRAP_PASSWORD: ${AUTHENTIK_BOOTSTRAP_PASSWORD:-dev-admin-password}
+      AUTHENTIK_BOOTSTRAP_EMAIL: admin@localhost
+      AUTHENTIK_POSTGRESQL__HOST: authentik-db
+      AUTHENTIK_POSTGRESQL__USER: authentik
+      AUTHENTIK_POSTGRESQL__NAME: authentik
+      AUTHENTIK_POSTGRESQL__PASSWORD: ${PG_PASS:-authentik-dev-password}
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-venueinter-dev-client-id}
+      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-venueinter-dev-client-secret}
+    ports:
+      - "9000:9000"
+      - "9443:9443"
+    volumes:
+      - ./authentik-blueprints:/blueprints/custom
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c 'import urllib.request; urllib.request.urlopen(\"http://localhost:9000/-/health/ready/\")'"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    depends_on:
+      authentik-db:
+        condition: service_healthy
+
+  authentik-worker:
+    image: ghcr.io/goauthentik/server:2025.10
+    container_name: authentik-worker
+    command: worker
+    environment:
+      AUTHENTIK_SECRET_KEY: ${AUTHENTIK_SECRET_KEY:-dev-secret-key-change-in-production}
+      AUTHENTIK_BOOTSTRAP_PASSWORD: ${AUTHENTIK_BOOTSTRAP_PASSWORD:-dev-admin-password}
+      AUTHENTIK_BOOTSTRAP_EMAIL: admin@localhost
+      AUTHENTIK_POSTGRESQL__HOST: authentik-db
+      AUTHENTIK_POSTGRESQL__USER: authentik
+      AUTHENTIK_POSTGRESQL__NAME: authentik
+      AUTHENTIK_POSTGRESQL__PASSWORD: ${PG_PASS:-authentik-dev-password}
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-venueinter-dev-client-id}
+      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-venueinter-dev-client-secret}
+    volumes:
+      - ./authentik-blueprints:/blueprints/custom
+    depends_on:
+      authentik-db:
+        condition: service_healthy
+
+volumes:
+  venue-ifx-data:
+  authentik-db-data:
+  venueinter-db-data:

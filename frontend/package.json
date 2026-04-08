@@ -1,0 +1,33 @@
+{
+	"name": "venueinter-frontend",
+	"private": true,
+	"version": "0.1.0",
+	"type": "module",
+	"scripts": {
+		"dev": "vite dev",
+		"build": "vite build",
+		"preview": "vite preview",
+		"prepare": "svelte-kit sync || echo ''",
+		"check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
+		"check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
+		"test:e2e": "node --import tsx/esm --test tests/smoke.test.ts tests/data-browser.test.ts"
+	},
+	"pnpm": {
+		"onlyBuiltDependencies": [
+			"esbuild",
+			"puppeteer"
+		]
+	},
+	"devDependencies": {
+		"@sveltejs/adapter-auto": "^7.0.0",
+		"@sveltejs/kit": "^2.50.2",
+		"@sveltejs/vite-plugin-svelte": "^6.2.4",
+		"@types/node": "^25.5.0",
+		"puppeteer": "^24.40.0",
+		"svelte": "^5.51.0",
+		"svelte-check": "^4.4.2",
+		"tsx": "^4.21.0",
+		"typescript": "^5.9.3",
+		"vite": "^7.3.1"
+	}
+}

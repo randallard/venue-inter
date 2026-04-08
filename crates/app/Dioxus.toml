@@ -1,0 +1,10 @@
+[application]
+name = "venueinter"
+default_platform = "fullstack"
+
+[web.app]
+title = "VenueInter — Venue Management System"
+
+[web.watcher]
+reload_html = true
+watch_path = ["src"]

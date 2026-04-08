@@ -1,0 +1,84 @@
+version: 1
+metadata:
+  name: venueinter-passkeys
+  labels:
+    blueprints.goauthentik.io/instantiate: "true"
+entries:
+  # ── WebAuthn Authenticator Setup Stage ─────────────────
+  - model: authentik_stages_authenticator_webauthn.authenticatorwebauthnstage
+    id: webauthn-setup-stage
+    state: present
+    identifiers:
+      name: venueinter-webauthn-setup
+    attrs:
+      friendly_name: Passkey Setup
+      resident_key_requirement: preferred
+      user_verification: preferred
+      authenticator_attachment: null
+
+  # ── Authenticator Validation Stage (WebAuthn only) ─────
+  - model: authentik_stages_authenticator_validate.authenticatorvalidatestage
+    id: webauthn-validation-stage
+    state: present
+    identifiers:
+      name: venueinter-webauthn-validation
+    attrs:
+      not_configured_action: deny
+      device_classes:
+        - webauthn
+
+  # ── Passwordless Authentication Flow ───────────────────
+  - model: authentik_flows.flow
+    id: passwordless-flow
+    state: present
+    identifiers:
+      slug: venueinter-passwordless
+    attrs:
+      name: VenueInter Passwordless Login
+      title: Sign in with a passkey
+      slug: venueinter-passwordless
+      designation: authentication
+
+  # ── Bind validation stage → passwordless flow (order 0)
+  - model: authentik_flows.flowstagebinding
+    state: present
+    identifiers:
+      target: !KeyOf passwordless-flow
+      stage: !KeyOf webauthn-validation-stage
+      order: 0
+    attrs:
+      target: !KeyOf passwordless-flow
+      stage: !KeyOf webauthn-validation-stage
+      order: 0
+
+  # ── Bind login stage → passwordless flow (order 10)
+  - model: authentik_flows.flowstagebinding
+    state: present
+    identifiers:
+      target: !KeyOf passwordless-flow
+      stage: !Find [authentik_stages_user_login.userloginstage, [name, default-authentication-login]]
+      order: 10
+    attrs:
+      target: !KeyOf passwordless-flow
+      stage: !Find [authentik_stages_user_login.userloginstage, [name, default-authentication-login]]
+      order: 10
+
+  # ── Patch default identification stage ─────────────────
+  - model: authentik_stages_identification.identificationstage
+    state: present
+    identifiers:
+      name: default-authentication-identification
+    attrs:
+      passwordless_flow: !KeyOf passwordless-flow
+
+  # ── Bind WebAuthn setup to user-settings flow ──────────
+  - model: authentik_flows.flowstagebinding
+    state: present
+    identifiers:
+      target: !Find [authentik_flows.flow, [slug, default-user-settings-flow]]
+      stage: !KeyOf webauthn-setup-stage
+      order: 40
+    attrs:
+      target: !Find [authentik_flows.flow, [slug, default-user-settings-flow]]
+      stage: !KeyOf webauthn-setup-stage
+      order: 40
