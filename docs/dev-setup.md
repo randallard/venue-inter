@@ -194,7 +194,91 @@ docker compose exec venueinter-db psql -U venueinter -c '\dt'
 
 ---
 
-## 8. Troubleshooting
+## 8. E2E tests (Puppeteer)
+
+Tests live in `frontend/tests/`. They run against a live stack — both the
+backend and the Authentik OIDC provider must be up before running.
+
+### 8a. Accounts required
+
+| Env var | Maps to | Purpose |
+|---|---|---|
+| `TEST_USER` | `devuser` | Standard admin user — used in all non-CEO tests |
+| `TEST_PASSWORD` | `dev-password` | Password for `devuser` |
+| `CEO_TEST_USER` | `ceouser` | User in the `ceo-review` Authentik group |
+| `CEO_TEST_PASSWORD` | `dev-password` | Password for `ceouser` |
+| `TEST_URL` | `http://localhost:5173` | Base URL of the SvelteKit dev server (default when unset) |
+
+Both users are created automatically by the Authentik blueprint
+(`authentik-blueprints/venue-inter-oauth2.yaml`) on first `docker compose up`.
+
+`CEO_TEST_USER`/`CEO_TEST_PASSWORD` are optional — CEO-specific tests skip
+gracefully when those vars are absent, so the full suite still passes for
+developers who only want to test the admin flow.
+
+### 8b. Run the tests
+
+Make sure the full stack is running (backend on `:8080`, SvelteKit dev server
+on `:5173`), then:
+
+```bash
+cd frontend
+
+# Minimal — admin tests only
+TEST_USER=devuser TEST_PASSWORD=dev-password pnpm test:e2e
+
+# Full suite — includes CEO queue, CEO decision, and maintenance mode tests
+TEST_USER=devuser TEST_PASSWORD=dev-password \
+CEO_TEST_USER=ceouser CEO_TEST_PASSWORD=dev-password \
+pnpm test:e2e
+```
+
+Or export them in your shell / add to a local `.env.test` file and load with
+`set -a && source .env.test && set +a` before running.
+
+### 8c. What the tests cover
+
+| Test file | Covers |
+|---|---|
+| `tests/smoke.test.ts` | Auth flow, navbar, unauthenticated redirect |
+| `tests/data-browser.test.ts` | Query list, master table, pagination, detail view |
+| `tests/reviews.test.ts` | Admin queues, individual review detail, send-to-CEO, CEO queue (role gate), CEO decision, review history, maintenance mode |
+
+### 8d. Test design notes
+
+- **Idempotent**: mutating tests (send-to-CEO, CEO decide) check current queue
+  state and skip if the queue is empty — the suite passes on repeated runs
+  without resetting the database.
+- **Headless**: Puppeteer runs in headless Chrome. Set `headless: false` in
+  `tests/helpers.ts` to watch the browser during debugging.
+- **Seed dependency**: the `reviews.test.ts` history test uses part_no `7` and
+  `11` from the Informix seed data. If the Informix container was rebuilt and
+  the seed was not re-applied, re-run:
+
+  ```bash
+  docker compose down informix-dev
+  docker volume rm venue-inter_venue-ifx-data
+  docker compose up -d informix-dev
+  # wait ~90 s for IDS initialized
+  ```
+
+---
+
+## 9. Troubleshooting
+
+**E2E tests fail with "Login failed" or hang on Authentik page**
+
+The Authentik UI selector may vary across versions. Check `tests/helpers.ts` —
+the login helper tries both `input[name="uidField"]` and `input[id="id_uid"]`.
+If neither matches your Authentik version, inspect the login page HTML and add
+the correct selector.
+
+**E2E tests skip CEO tests even when CEO_TEST_USER is set**
+
+Verify the variable is exported (not just in `.env`):
+```bash
+echo $CEO_TEST_USER   # should print "ceouser"
+```
 
 **Backend fails with linker error or missing `libifcli.so`**
 

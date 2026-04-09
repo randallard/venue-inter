@@ -54,7 +54,12 @@
 </script>
 
 <div class="container">
-	<a class="back-link" href="/reviews/disqualify">Disqualify Queue</a>
+	<div class="nav-row">
+		<a class="back-link" href="/reviews/disqualify">Disqualify Queue</a>
+		{#if detail}
+			<a class="back-link" href="/reviews/records/{detail.part_no}">View History</a>
+		{/if}
+	</div>
 
 	{#if loading}
 		<p class="text-muted">Loading…</p>
@@ -142,4 +147,5 @@
 	.notes-area:focus { outline: none; border-color: var(--gold); box-shadow: 0 0 0 3px rgba(181,152,90,0.15); }
 	.pg-status { background: #dbeafe; color: #1e40af; padding: 0.15rem 0.5rem; border-radius: 3px; font-size: 0.82rem; font-weight: 600; }
 	.msg-ok { color: var(--green); font-weight: 600; }
+	.nav-row { display: flex; gap: 1rem; align-items: center; margin-bottom: 0.5rem; }
 </style>

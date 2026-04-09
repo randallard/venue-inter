@@ -3,6 +3,8 @@ import puppeteer, { type Browser, type Page } from 'puppeteer';
 export const BASE_URL = process.env.TEST_URL ?? 'http://localhost:5173';
 const TEST_USER = process.env.TEST_USER ?? '';
 const TEST_PASSWORD = process.env.TEST_PASSWORD ?? '';
+export const CEO_TEST_USER = process.env.CEO_TEST_USER ?? '';
+export const CEO_TEST_PASSWORD = process.env.CEO_TEST_PASSWORD ?? '';
 
 export async function setup(): Promise<{ browser: Browser; page: Page }> {
 	const browser = await puppeteer.launch({ headless: true });
@@ -42,6 +44,29 @@ export async function login(page: Page): Promise<void> {
 	if (!page.url().startsWith(BASE_URL)) {
 		throw new Error(`Login failed — ended up at: ${page.url()}`);
 	}
+}
+
+/**
+ * Log in as the CEO review user.
+ * Requires CEO_TEST_USER and CEO_TEST_PASSWORD environment variables.
+ * Returns false (and skips) if those vars aren't set.
+ */
+export async function loginAsCeo(page: Page): Promise<boolean> {
+	if (!CEO_TEST_USER || !CEO_TEST_PASSWORD) return false;
+
+	await page.goto(`${BASE_URL}/auth/login?return_to=/reviews/ceo`);
+
+	await page.waitForSelector('input[name="uidField"], input[id="id_uid"]', { timeout: 15_000 });
+	const uidSelector = (await page.$('input[name="uidField"]')) ? 'input[name="uidField"]' : 'input[id="id_uid"]';
+	await page.type(uidSelector, CEO_TEST_USER);
+	await page.keyboard.press('Enter');
+
+	await page.waitForSelector('input[type="password"]', { timeout: 10_000 });
+	await page.type('input[type="password"]', CEO_TEST_PASSWORD);
+	await page.keyboard.press('Enter');
+
+	await page.waitForNavigation({ waitUntil: 'networkidle0', timeout: 20_000 });
+	return true;
 }
 
 /**

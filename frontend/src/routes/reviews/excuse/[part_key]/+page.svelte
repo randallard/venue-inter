@@ -69,7 +69,12 @@
 </script>
 
 <div class="container">
-	<a class="back-link" href="/reviews/excuse">Excuse Queue</a>
+	<div class="nav-row">
+		<a class="back-link" href="/reviews/excuse">Excuse Queue</a>
+		{#if detail}
+			<a class="back-link" href="/reviews/records/{detail.part_no}">View History</a>
+		{/if}
+	</div>
 
 	{#if loading}
 		<p class="text-muted">Loading…</p>
@@ -238,4 +243,11 @@
 	}
 
 	.msg-ok { color: var(--green); font-weight: 600; }
+
+	.nav-row {
+		display: flex;
+		gap: 1rem;
+		align-items: center;
+		margin-bottom: 0.5rem;
+	}
 </style>

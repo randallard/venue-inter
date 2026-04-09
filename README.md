@@ -113,11 +113,30 @@ Informix takes ~90 s on first start. Visit http://localhost:5173.
 
 ### Dev credentials
 
-| Role | Username | Password |
-|---|---|---|
-| Admin (full access) | `devuser` | `dev-password` |
-| CEO (review only) | `ceouser` | `dev-password` |
-| Authentik admin | `akadmin` | `dev-admin-password` |
+Both users are created automatically by the Authentik blueprint on first startup.
+
+| Account | Username | Password | Authentik groups | Access |
+|---|---|---|---|---|
+| Admin | `devuser` | `dev-password` | `users`, `helpdesk` | Full app access |
+| CEO | `ceouser` | `dev-password` | `users`, `ceo-review` | Full access + CEO review queue |
+| Authentik admin | `akadmin` | `dev-admin-password` | — | Authentik UI at `:9000` only |
+
+### Running E2E tests (Puppeteer)
+
+```bash
+cd frontend
+
+# Admin tests only
+TEST_USER=devuser TEST_PASSWORD=dev-password pnpm test:e2e
+
+# Full suite including CEO queue and decision tests
+TEST_USER=devuser TEST_PASSWORD=dev-password \
+CEO_TEST_USER=ceouser CEO_TEST_PASSWORD=dev-password \
+pnpm test:e2e
+```
+
+`CEO_TEST_USER`/`CEO_TEST_PASSWORD` are optional — CEO tests skip gracefully
+when absent. See **[docs/dev-setup.md § 8](docs/dev-setup.md)** for full details.
 
 ### Running without Docker (backend only)
 

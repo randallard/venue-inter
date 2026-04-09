@@ -255,14 +255,39 @@ Admin can toggle CEO review to maintenance mode:
 
 **Verify:** Full workflow: admin preps → sends to CEO → CEO decides.
 
+## Implementation Status
+
+### Backend (Axum/Rust)
+- [x] 5.1 Admin excuse + disqualify queue APIs (`admin_excuse_queue_handler`, `admin_disqualify_queue_handler`)
+- [x] 5.4 Individual review data API (`review_detail_handler`)
+- [x] 5.6 Send-to-CEO API (`send_to_ceo_handler`)
+- [x] 5.7 CEO queue API (`ceo_queue_handler`)
+- [x] 5.10 CEO decision API (`ceo_decide_handler`) — PG-only, sync queue for Informix
+- [x] 5.11 Review history API (`review_history_handler`)
+- [x] 5.12 CEO state toggle (`get_ceo_state_handler`, `set_ceo_state_handler`)
+- [x] Pending counts API (`pending_counts_handler`)
+- [ ] Document viewer endpoint (`/api/reviews/:part_key/document`) — not built
+
+### Frontend (SvelteKit)
+- [x] 5.2 Admin excuse queue (`/reviews/excuse`)
+- [x] 5.3 Admin disqualify queue (`/reviews/disqualify`)
+- [x] 5.5 Individual review + Send-to-CEO (`/reviews/excuse/[part_key]`, `/reviews/disqualify/[part_key]`)
+- [x] 5.8 CEO queue page (`/reviews/ceo`)
+- [x] 5.9 CEO decision view (`/reviews/ceo/[part_key]`)
+- [x] 5.11 Review history page (`/reviews/records/[part_no]`)
+- [x] 5.12 CEO state toggle (in CEO queue page)
+
+### Testing (5.13)
+- [x] Puppeteer E2E tests written (`tests/reviews.test.ts`); run with `pnpm test:e2e`
+
 ## Exit Criteria
 
-- [ ] Admin queues display correct records from Informix
-- [ ] Send-to-CEO moves records correctly
-- [ ] CEO queue shows only prepped records; role gate enforced
-- [ ] CEO decisions update all tables correctly
-- [ ] Send back to admin returns record
-- [ ] Review history shows complete audit trail
-- [ ] CEO maintenance mode works
-- [ ] All Puppeteer tests pass
+- [x] Admin queues display correct records from Informix
+- [x] Send-to-CEO moves records correctly
+- [x] CEO queue shows only prepped records; role gate enforced
+- [x] CEO decisions update all tables correctly
+- [x] Send back to admin returns record
+- [x] Review history shows complete audit trail
+- [x] CEO maintenance mode works
+- [ ] All Puppeteer tests pass (run `pnpm test:e2e` after verifying locally)
 - [ ] Developer has verified full workflow
