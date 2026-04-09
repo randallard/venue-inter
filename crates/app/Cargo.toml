@@ -24,6 +24,7 @@ openidconnect = { workspace = true, optional = true }
 sqlx = { workspace = true, optional = true }
 uuid = { workspace = true, optional = true }
 tower-sessions-sqlx-store = { workspace = true, optional = true }
+tower-http = { workspace = true, optional = true }
 tower_governor = { workspace = true, optional = true }
 gloo-timers = { version = "0.3", features = ["futures"], optional = true }
 
@@ -46,5 +47,6 @@ server = [
     "dep:sqlx",
     "dep:uuid",
     "dep:tower-sessions-sqlx-store",
+    "dep:tower-http",
     "dep:tower_governor",
 ]

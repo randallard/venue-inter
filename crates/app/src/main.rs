@@ -17,8 +17,7 @@ fn main() {
             http::{HeaderName, HeaderValue},
             routing::{get, post},
         };
-        use openidconnect::{ClientId, ClientSecret, IssuerUrl, RedirectUrl};
-        use openidconnect::core::CoreProviderMetadata;
+        use server::auth::routes::discover_oidc_client;
         use time::Duration;
         use tower_http::{
             request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer},
@@ -26,7 +25,8 @@ fn main() {
         };
         use tower_sessions::{Expiry, MemoryStore, SessionManagerLayer};
         use tower_sessions_sqlx_store::PostgresStore;
-        use tower_governor::{GovernorConfigBuilder, GovernorLayer};
+        use tower_governor::GovernorLayer;
+        use tower_governor::governor::GovernorConfigBuilder;
         use tracing::info;
 
         use server::auth::types::OidcConfig;
@@ -108,31 +108,25 @@ fn main() {
             .build()
             .context("Failed to build HTTP client")?;
 
-        info!(issuer = %oidc_config.issuer_url, "Discovering OIDC provider");
-        let issuer_url = IssuerUrl::new(oidc_config.issuer_url.clone())
-            .context("Invalid OIDC issuer URL")?;
-
-        let provider_metadata =
-            CoreProviderMetadata::discover_async(issuer_url, &http_client)
-                .await
-                .context("OIDC provider discovery failed")?;
-
-        let oidc_client = openidconnect::core::CoreClient::from_provider_metadata(
-            provider_metadata,
-            ClientId::new(oidc_config.client_id),
-            Some(ClientSecret::new(oidc_config.client_secret)),
-        )
-        .set_redirect_uri(
-            RedirectUrl::new(oidc_config.redirect_uri).context("Invalid OIDC redirect URI")?,
-        );
-
-        info!("OIDC client configured successfully");
+        // --- OIDC discovery (non-fatal — retried lazily on first login) ---
+        info!(issuer = %oidc_config.issuer_url, "Attempting OIDC provider discovery");
+        let oidc_client = match discover_oidc_client(&oidc_config, &http_client).await {
+            Ok(client) => {
+                info!("OIDC client configured successfully");
+                Some(client)
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "OIDC discovery failed at startup — login will retry on first request");
+                None
+            }
+        };
 
         // --- Build state ---
         let state = Arc::new(AppState {
             env,
             config,
-            oidc_client,
+            oidc_client: tokio::sync::RwLock::new(oidc_client),
+            oidc_config,
             http_client,
             pg_pool,
             email_config,
@@ -179,7 +173,7 @@ fn main() {
             .route("/auth/login", get(server::auth::routes::login_handler))
             .route("/auth/callback", get(server::auth::routes::callback_handler))
             .route("/auth/logout", post(server::auth::routes::logout_handler))
-            .layer(GovernorLayer { config: governor_conf })
+            .layer(GovernorLayer::new(governor_conf))
             .with_state(state.clone());
 
         let public_routes: axum::Router<()> = axum::Router::new()
@@ -273,7 +267,7 @@ fn main() {
         let final_router = if let Some(ref pool) = state.pg_pool {
             let pg_store = PostgresStore::new(pool.clone());
             pg_store.migrate().await
-                .context("Failed to create sessions table in PostgreSQL")?;
+                .map_err(|e| anyhow::anyhow!("Failed to create sessions table in PostgreSQL: {e}"))?;
             info!("Using PostgreSQL session store");
             base_router.layer(
                 SessionManagerLayer::new(pg_store)

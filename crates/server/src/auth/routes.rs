@@ -1,13 +1,15 @@
 use std::sync::Arc;
 
+use anyhow::Context;
 use axum::{
     extract::{Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Redirect, Response},
 };
 use openidconnect::{
-    core::CoreAuthenticationFlow, AuthorizationCode, CsrfToken, Nonce, PkceCodeChallenge,
-    PkceCodeVerifier, Scope, TokenResponse,
+    core::{CoreAuthenticationFlow, CoreProviderMetadata},
+    AuthorizationCode, ClientId, ClientSecret, CsrfToken, IssuerUrl, Nonce,
+    PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, Scope, TokenResponse,
 };
 use serde::Deserialize;
 use tower_sessions::Session;
@@ -15,7 +17,30 @@ use base64::Engine;
 use tracing::{error, info, warn};
 
 use crate::AppState;
+use crate::auth::types::{ConfiguredClient, OidcConfig};
 use shared_types::UserSession;
+
+/// Perform OIDC provider discovery and build a configured client.
+/// Extracted so it can be called both at startup and lazily on first login.
+pub async fn discover_oidc_client(
+    config: &OidcConfig,
+    http_client: &reqwest::Client,
+) -> anyhow::Result<ConfiguredClient> {
+    let issuer_url = IssuerUrl::new(config.issuer_url.clone())
+        .context("Invalid OIDC issuer URL")?;
+    let provider_metadata = CoreProviderMetadata::discover_async(issuer_url, http_client)
+        .await
+        .context("OIDC provider discovery failed")?;
+    let client = openidconnect::core::CoreClient::from_provider_metadata(
+        provider_metadata,
+        ClientId::new(config.client_id.clone()),
+        Some(ClientSecret::new(config.client_secret.clone())),
+    )
+    .set_redirect_uri(
+        RedirectUrl::new(config.redirect_uri.clone()).context("Invalid OIDC redirect URI")?,
+    );
+    Ok(client)
+}
 
 const PKCE_VERIFIER_KEY: &str = "pkce_verifier";
 const CSRF_STATE_KEY: &str = "csrf_state";
@@ -64,10 +89,31 @@ pub async fn login_handler(
     let ip = extract_ip(&headers);
     let request_id = extract_request_id(&headers);
 
+    // Lazy OIDC discovery: if startup discovery failed, try again on first login.
+    {
+        let guard = state.oidc_client.read().await;
+        if guard.is_none() {
+            drop(guard);
+            info!("OIDC client not available — attempting lazy discovery");
+            match discover_oidc_client(&state.oidc_config, &state.http_client).await {
+                Ok(client) => {
+                    *state.oidc_client.write().await = Some(client);
+                    info!("OIDC client configured via lazy discovery");
+                }
+                Err(e) => {
+                    error!(error = %e, "Lazy OIDC discovery failed — login unavailable");
+                    return Err(StatusCode::SERVICE_UNAVAILABLE);
+                }
+            }
+        }
+    }
+
+    let client_guard = state.oidc_client.read().await;
+    let oidc_client = client_guard.as_ref().unwrap();
+
     let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
 
-    let (auth_url, csrf_token, nonce) = state
-        .oidc_client
+    let (auth_url, csrf_token, nonce) = oidc_client
         .authorize_url(
             CoreAuthenticationFlow::AuthorizationCode,
             CsrfToken::new_random,
@@ -165,8 +211,13 @@ pub async fn callback_handler(
     let pkce_verifier = PkceCodeVerifier::new(pkce_secret);
     let nonce = Nonce::new(nonce_secret);
 
-    let token_response = state
-        .oidc_client
+    let client_guard = state.oidc_client.read().await;
+    let oidc_client = client_guard.as_ref().ok_or_else(|| {
+        error!("OIDC callback received but client is not configured");
+        (StatusCode::SERVICE_UNAVAILABLE, "Authentication service unavailable".to_string())
+    })?;
+
+    let token_response = oidc_client
         .exchange_code(AuthorizationCode::new(params.code))
         .map_err(|e| {
             error!(error = %e, "Token endpoint not configured");
@@ -188,7 +239,7 @@ pub async fn callback_handler(
     })?;
 
     let claims = id_token
-        .claims(&state.oidc_client.id_token_verifier(), &nonce)
+        .claims(&oidc_client.id_token_verifier(), &nonce)
         .map_err(|e| {
             crate::audit::login_failure("id_token_validation_failed", ip.as_deref(), request_id.as_deref());
             error!(error = %e, "ID token validation failed");

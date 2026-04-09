@@ -139,87 +139,89 @@ pub async fn review_detail_handler(
     let (part_no, pool_no) = parse_part_key(&part_key)
         .ok_or_else(|| api_err(StatusCode::BAD_REQUEST, "Invalid part_key format (expected part_no_pool_no)"))?;
 
-    let conn = state
-        .env
-        .connect(
-            &state.config.dsn,
-            &state.config.user,
-            &state.config.password,
-            ConnectionOptions::default(),
-        )
-        .map_err(|e| {
-            error!(error = %e, "ReviewDetail: connect failed");
-            api_err(StatusCode::SERVICE_UNAVAILABLE, format!("DB connection failed: {e}"))
-        })?;
+    // odbc_api types are !Send — isolate all ODBC work in a block so nothing
+    // non-Send is live across the .await below.
+    let mut detail: ReviewDetail = {
+        let conn = state
+            .env
+            .connect(
+                &state.config.dsn,
+                &state.config.user,
+                &state.config.password,
+                ConnectionOptions::default(),
+            )
+            .map_err(|e| {
+                error!(error = %e, "ReviewDetail: connect failed");
+                api_err(StatusCode::SERVICE_UNAVAILABLE, format!("DB connection failed: {e}"))
+            })?;
 
-    let sql = format!(
-        "SELECT FIRST 1 \
-            p.part_no, p.fname, p.lname, p.addr, p.city, p.state, p.zip, p.email, \
-            p.gender, p.race_code, p.active, \
-            po.div_code, po.ret_date, \
-            pm.pm_id, pm.status, \
-            rr.review_type, rr.status, rr.admin_notes, rr.submitted_date \
-         FROM participant p \
-         JOIN pool_member pm ON pm.part_no = p.part_no AND pm.pool_no = {pool_no} \
-         JOIN pool po ON po.pool_no = {pool_no} \
-         JOIN review_record rr ON rr.part_no = p.part_no AND rr.pool_no = {pool_no} \
-         WHERE p.part_no = {part_no} \
-         ORDER BY rr.submitted_date DESC"
-    );
+        let sql = format!(
+            "SELECT FIRST 1 \
+                p.part_no, p.fname, p.lname, p.addr, p.city, p.state, p.zip, p.email, \
+                p.gender, p.race_code, p.active, \
+                po.div_code, po.ret_date, \
+                pm.pm_id, pm.status, \
+                rr.review_type, rr.status, rr.admin_notes, rr.submitted_date \
+             FROM participant p \
+             JOIN pool_member pm ON pm.part_no = p.part_no AND pm.pool_no = {pool_no} \
+             JOIN pool po ON po.pool_no = {pool_no} \
+             JOIN review_record rr ON rr.part_no = p.part_no AND rr.pool_no = {pool_no} \
+             WHERE p.part_no = {part_no} \
+             ORDER BY rr.submitted_date DESC"
+        );
 
-    let mut stmt = conn
-        .execute(&sql, ())
-        .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("Query failed: {e}")))?
-        .ok_or_else(|| api_err(StatusCode::NOT_FOUND, "Review record not found"))?;
+        let mut stmt = conn
+            .execute(&sql, ())
+            .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("Query failed: {e}")))?
+            .ok_or_else(|| api_err(StatusCode::NOT_FOUND, "Review record not found"))?;
 
-    let mut buf = TextRowSet::for_cursor(1, &mut stmt, Some(4096))
-        .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("Buffer error: {e}")))?;
-    let mut cursor = stmt
-        .bind_buffer(&mut buf)
-        .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("Bind error: {e}")))?;
+        let mut buf = TextRowSet::for_cursor(1, &mut stmt, Some(4096))
+            .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("Buffer error: {e}")))?;
+        let mut cursor = stmt
+            .bind_buffer(&mut buf)
+            .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("Bind error: {e}")))?;
 
-    let batch = cursor
-        .fetch()
-        .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("Fetch error: {e}")))?
-        .ok_or_else(|| api_err(StatusCode::NOT_FOUND, "Review record not found"))?;
+        let batch = cursor
+            .fetch()
+            .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("Fetch error: {e}")))?
+            .ok_or_else(|| api_err(StatusCode::NOT_FOUND, "Review record not found"))?;
 
-    let row = 0;
-    let mut detail = ReviewDetail {
-        part_no,
-        pool_no,
-        part_key: part_key.clone(),
-        fname: col_str(&batch, 1, row),
-        lname: col_str(&batch, 2, row),
-        addr: col_str(&batch, 3, row),
-        city: col_str(&batch, 4, row),
-        state_code: col_str(&batch, 5, row),
-        zip: col_str(&batch, 6, row),
-        email: col_str(&batch, 7, row),
-        gender: col_str(&batch, 8, row),
-        race_code: col_str(&batch, 9, row),
-        active: col_str(&batch, 10, row),
-        pool_div_code: col_str(&batch, 11, row),
-        pool_ret_date: col_str(&batch, 12, row),
-        pm_id: col_str(&batch, 13, row)
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(0),
-        member_status: col_str(&batch, 14, row)
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(1),
-        review_type: col_str(&batch, 15, row).unwrap_or_default(),
-        ifx_status: col_str(&batch, 16, row).unwrap_or_default(),
-        admin_notes: col_str(&batch, 17, row),
-        submitted_date: col_str(&batch, 18, row),
-        // PG fields — populated below
-        pg_status: None,
-        ceo_notes: None,
-        decision: None,
-        sent_to_ceo_at: None,
-        decided_at: None,
+        let row = 0;
+        ReviewDetail {
+            part_no,
+            pool_no,
+            part_key: part_key.clone(),
+            fname: col_str(&batch, 1, row),
+            lname: col_str(&batch, 2, row),
+            addr: col_str(&batch, 3, row),
+            city: col_str(&batch, 4, row),
+            state_code: col_str(&batch, 5, row),
+            zip: col_str(&batch, 6, row),
+            email: col_str(&batch, 7, row),
+            gender: col_str(&batch, 8, row),
+            race_code: col_str(&batch, 9, row),
+            active: col_str(&batch, 10, row),
+            pool_div_code: col_str(&batch, 11, row),
+            pool_ret_date: col_str(&batch, 12, row),
+            pm_id: col_str(&batch, 13, row)
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0),
+            member_status: col_str(&batch, 14, row)
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(1),
+            review_type: col_str(&batch, 15, row).unwrap_or_default(),
+            ifx_status: col_str(&batch, 16, row).unwrap_or_default(),
+            admin_notes: col_str(&batch, 17, row),
+            submitted_date: col_str(&batch, 18, row),
+            // PG fields — populated below
+            pg_status: None,
+            ceo_notes: None,
+            decision: None,
+            sent_to_ceo_at: None,
+            decided_at: None,
+        }
+        // cursor, buf, conn all dropped here — no !Send types escape the block
     };
-    drop(cursor);
-    drop(buf);
-    drop(conn);
 
     // Overlay PG status_reviews data if present
     if let Some(pg) = &state.pg_pool {
@@ -273,40 +275,42 @@ pub async fn send_to_ceo_handler(
     let (part_no, pool_no) = parse_part_key(&params.part_key)
         .ok_or_else(|| api_err(StatusCode::BAD_REQUEST, "Invalid part_key"))?;
 
-    // Get review_type from Informix
-    let conn = state
-        .env
-        .connect(
-            &state.config.dsn,
-            &state.config.user,
-            &state.config.password,
-            ConnectionOptions::default(),
-        )
-        .map_err(|e| api_err(StatusCode::SERVICE_UNAVAILABLE, format!("DB connection failed: {e}")))?;
+    // Get review_type from Informix — odbc_api types are !Send; isolate in block
+    // so nothing non-Send is live across the .await points below.
+    let review_type: String = {
+        let conn = state
+            .env
+            .connect(
+                &state.config.dsn,
+                &state.config.user,
+                &state.config.password,
+                ConnectionOptions::default(),
+            )
+            .map_err(|e| api_err(StatusCode::SERVICE_UNAVAILABLE, format!("DB connection failed: {e}")))?;
 
-    let type_sql = format!(
-        "SELECT FIRST 1 review_type FROM review_record \
-         WHERE part_no = {part_no} AND pool_no = {pool_no} \
-         ORDER BY submitted_date DESC"
-    );
-    let mut stmt = conn
-        .execute(&type_sql, ())
-        .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("Query failed: {e}")))?
-        .ok_or_else(|| api_err(StatusCode::NOT_FOUND, "No review record found for this participant/pool"))?;
+        let type_sql = format!(
+            "SELECT FIRST 1 review_type FROM review_record \
+             WHERE part_no = {part_no} AND pool_no = {pool_no} \
+             ORDER BY submitted_date DESC"
+        );
+        let mut stmt = conn
+            .execute(&type_sql, ())
+            .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("Query failed: {e}")))?
+            .ok_or_else(|| api_err(StatusCode::NOT_FOUND, "No review record found for this participant/pool"))?;
 
-    let mut buf = TextRowSet::for_cursor(1, &mut stmt, Some(64))
-        .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("Buffer error: {e}")))?;
-    let mut cursor = stmt
-        .bind_buffer(&mut buf)
-        .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("Bind error: {e}")))?;
+        let mut buf = TextRowSet::for_cursor(1, &mut stmt, Some(64))
+            .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("Buffer error: {e}")))?;
+        let mut cursor = stmt
+            .bind_buffer(&mut buf)
+            .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("Bind error: {e}")))?;
 
-    let review_type = cursor
-        .fetch()
-        .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("Fetch error: {e}")))?
-        .and_then(|batch| col_str(&batch, 0, 0))
-        .ok_or_else(|| api_err(StatusCode::NOT_FOUND, "Review record not found"))?;
-    drop(cursor);
-    drop(buf);
+        cursor
+            .fetch()
+            .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("Fetch error: {e}")))?
+            .and_then(|batch| col_str(&batch, 0, 0))
+            .ok_or_else(|| api_err(StatusCode::NOT_FOUND, "Review record not found"))?
+        // conn, cursor, buf all dropped here
+    };
 
     // Check if already completed in PG
     let existing_status: Option<String> = sqlx::query_scalar(
@@ -367,18 +371,32 @@ pub async fn send_to_ceo_handler(
     .await
     .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("History insert failed: {e}")))?;
 
-    // Update Informix review_record directly (admin action, not time-critical)
-    conn.execute(
-        &format!(
-            "UPDATE review_record SET status = 'S' \
-             WHERE part_no = {part_no} AND pool_no = {pool_no}"
-        ),
-        (),
-    )
-    .map_err(|e| {
-        error!(error = %e, part_no, pool_no, "Failed to update Informix review_record status");
-        api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("Informix update failed: {e}"))
-    })?;
+    // Update Informix review_record (new connection — odbc_api types are !Send)
+    {
+        let conn = state
+            .env
+            .connect(
+                &state.config.dsn,
+                &state.config.user,
+                &state.config.password,
+                ConnectionOptions::default(),
+            )
+            .map_err(|e| {
+                error!(error = %e, part_no, pool_no, "Failed to connect for Informix update");
+                api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("Informix connect failed: {e}"))
+            })?;
+        conn.execute(
+            &format!(
+                "UPDATE review_record SET status = 'S' \
+                 WHERE part_no = {part_no} AND pool_no = {pool_no}"
+            ),
+            (),
+        )
+        .map_err(|e| {
+            error!(error = %e, part_no, pool_no, "Failed to update Informix review_record status");
+            api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("Informix update failed: {e}"))
+        })?;
+    }
 
     info!(part_key = %params.part_key, actor = %user.sub, "Sent review to CEO");
     Ok(Json(ActionResponse {
