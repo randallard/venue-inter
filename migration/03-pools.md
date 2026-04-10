@@ -160,9 +160,30 @@ with export button.
 
 **Verify:** All tests pass.
 
+## Implementation Status
+
+### Backend
+- [x] `GET /api/pools` — pools listing
+- [x] `GET /api/pools/{pool_no}/members` — pool members
+- [x] `GET /api/participants` — participants list (bulk; no individual lookup endpoint)
+- [x] `GET /api/pool_staff`
+- [ ] `POST /api/pools/draw` — not built
+- [ ] `POST /api/pools/draw/export` — not built
+- [ ] `POST /api/pools/seating` — not built
+- [ ] `GET /api/participants/:part_no` — individual lookup not built
+
+### Frontend
+- [x] `/pools` — pools listing with member count
+- [ ] `/pools/draw` — not built
+- [ ] `/pools/seating` — not built
+- [ ] `/pools/lookup` — not built
+
+### Testing
+- [ ] `pools.test.ts` — not written
+
 ## Exit Criteria
 
-- [ ] Active pools page shows correct pool list
+- [x] Active pools page shows correct pool list
 - [ ] Draw produces correct randomized results
 - [ ] Excel export works
 - [ ] Participant lookup returns correct data

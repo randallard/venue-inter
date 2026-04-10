@@ -6,7 +6,7 @@ use axum::{
     response::{IntoResponse, Json, Response},
 };
 use chrono::{DateTime, Utc};
-use odbc_api::{buffers::TextRowSet, ConnectionOptions};
+use odbc_api::{buffers::TextRowSet, ConnectionOptions, Cursor};
 use serde::Serialize;
 use uuid::Uuid;
 

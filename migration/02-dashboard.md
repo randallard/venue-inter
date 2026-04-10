@@ -135,10 +135,31 @@ Confirmation modal before executing. Dashboard badge updates after fix.
 
 **Verify:** All tests pass.
 
+## Implementation Status
+
+### Backend
+- [x] `GET /api/dashboard/status` — bad show codes, blank QQs, portal lockouts, `informix_sync_pending`, `informix_sync_failed`
+- [x] `GET/POST /api/pools/fix-show-codes`
+- [x] `GET /api/pools/blank-questionnaires`
+- [x] `POST /api/pools/reset-qq`
+- [x] `GET /api/pools/lockouts`
+- [x] `POST /api/pools/unlock`
+
+### Frontend
+- [x] `/` — dashboard with status cards (bad codes, blank QQs, lockouts, sync pending, sync failed)
+- [x] `/pools/fix-show-codes`
+- [x] `/pools/reset-questionnaire`
+- [x] `/pools/lockouts`
+- [ ] Sync failure detail view (clicking failed count to see `last_error` / payload) — not built; use `/reviews/sync` instead
+
+### Testing
+- [ ] `dashboard.test.ts` — not written
+
 ## Exit Criteria
 
-- [ ] Dashboard shows correct status counts
-- [ ] Each remediation action works end-to-end
-- [ ] Dashboard badges update after remediation
-- [ ] All Puppeteer tests pass
+- [x] Dashboard shows correct status counts
+- [x] Each remediation action works end-to-end (fix show codes, reset QQ, unlock)
+- [ ] Dashboard badges update after remediation (verify locally)
+- [ ] Sync failure detail view (or accepted substitute via `/reviews/sync`)
+- [ ] `dashboard.test.ts` Puppeteer tests written
 - [ ] Developer has verified each workflow

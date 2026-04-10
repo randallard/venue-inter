@@ -21,7 +21,9 @@ import type {
 	DecideResponse,
 	ReviewHistoryResponse,
 	PendingCountsResponse,
-	CeoReviewStateResponse
+	CeoReviewStateResponse,
+	SyncStatusResponse,
+	SyncOneResponse
 } from './types';
 
 class ApiError extends Error {
@@ -206,6 +208,18 @@ export async function setCeoReviewState(state: 'live' | 'maintenance'): Promise<
 		headers: { 'Content-Type': 'application/json' },
 		body: JSON.stringify({ state })
 	});
+}
+
+export async function getSyncStatus(): Promise<SyncStatusResponse> {
+	return apiFetch('/api/reviews/sync-status');
+}
+
+export async function syncOneRecord(part_key: string): Promise<SyncOneResponse> {
+	return apiFetch(`/api/reviews/sync-status/sync/${part_key}`, { method: 'POST' });
+}
+
+export async function lookupSyncRecord(query: string): Promise<SyncStatusResponse> {
+	return apiFetch(`/api/reviews/sync-status/lookup/${encodeURIComponent(query)}`);
 }
 
 export { ApiError };

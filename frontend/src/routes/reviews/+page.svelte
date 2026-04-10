@@ -72,6 +72,16 @@
 		</a>
 	</div>
 
+	<div class="tools-section">
+		<a class="tool-link" href="/reviews/sync">
+			<span class="tool-icon">⟳</span>
+			<span>
+				<strong>Sync Status</strong>
+				<span class="tool-desc">Cross-system health: Informix vs PostgreSQL vs sync queue</span>
+			</span>
+		</a>
+	</div>
+
 	<div class="history-section">
 		<h2>Review History Lookup</h2>
 		<p class="text-muted">Enter a participant number to view their full review history.</p>
@@ -135,6 +145,48 @@
 
 	.queue-sub {
 		font-size: 0.82rem;
+		color: var(--text-muted);
+	}
+
+	.tools-section {
+		margin-top: 1.75rem;
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.75rem;
+	}
+
+	.tool-link {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.75rem;
+		padding: 0.65rem 1rem;
+		background: var(--surface);
+		border: 1px solid var(--border);
+		border-radius: var(--radius);
+		text-decoration: none;
+		color: var(--text);
+		font-size: 0.875rem;
+		transition: box-shadow 0.15s, border-color 0.15s;
+	}
+	.tool-link:hover {
+		border-color: var(--gold);
+		box-shadow: var(--shadow);
+		text-decoration: none;
+	}
+
+	.tool-icon {
+		font-size: 1.1rem;
+		color: var(--text-muted);
+		flex-shrink: 0;
+	}
+
+	.tool-link strong {
+		display: block;
+		font-weight: 600;
+	}
+
+	.tool-desc {
+		font-size: 0.78rem;
 		color: var(--text-muted);
 	}
 

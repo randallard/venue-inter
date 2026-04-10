@@ -107,6 +107,15 @@ for all non-responding members in a pool.
 
 **Verify:** All tests pass.
 
+## Implementation Status
+
+- [ ] Phase not started — no API endpoints, no frontend routes
+
+**Note:** Questionnaire data from the national system is now accessed via the document
+caching system (Phase 5 extension): `GET /api/reviews/:part_key/documents` fetches
+TIF files from WebDAV. This covers the CEO review use case. The full questionnaire
+management workflow (generation, distribution tracking, upload) remains unbuilt.
+
 ## Exit Criteria
 
 - [ ] Questionnaire status page shows correct completion states

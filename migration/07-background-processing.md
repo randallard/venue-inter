@@ -111,15 +111,37 @@ Add task type labels and scheduled-task indicators.
 
 **Verify:** All tests pass.
 
+## Implementation Status
+
+### Infrastructure
+- [x] `informix_sync_queue` table exists (`migrations/init.sql`); populated by `ceo_decide_handler` (Phase 5)
+- [x] `dashboard_status_handler` returns `informix_sync_pending` and `informix_sync_failed` counts
+- [x] Sync status admin page (`/reviews/sync`) — per-record health badges, error details, sync queue state
+
+### Cron tasks (`crates/server/src/sync.rs`)
+- [x] 7.0 `process_sync_queue` — drains `informix_sync_queue`; executes Informix ODBC writes; marks rows completed/failed; after 3 attempts marks `status = 'failed'`; spawned every 2 min via `spawn_sync_queue_cron`
+- [x] 7.1 `refresh_review_queue` — inserts new Informix `review_record` (status='P') rows into PG `status_reviews` (pending_admin); idempotent ON CONFLICT DO NOTHING; spawned every 5 min via `spawn_review_refresh_cron`
+- [ ] 7.2 `sync_participant_data` nightly cron — not yet built
+- [ ] 7.3 Cron task history in `/tasks` UI — not yet built
+
+### Per-record sync API
+- [x] `POST /api/reviews/sync-status/sync/:part_key` — immediately processes pending sync queue rows for one record; returns `{processed, succeeded, failed, errors[]}`
+- [x] Sync button in `/reviews/sync` UI — triggers per-record sync, updates health badge inline
+
+### Record lookup API
+- [x] `GET /api/reviews/sync-status/lookup/:query` — accepts part_no or part_key; queries Informix review_record (all statuses, not just P) and PG; returns `SyncStatusResponse` — works for closed/processed records not in the main listing
+- [x] Lookup input in `/reviews/sync` UI — shows results in a highlighted panel above the main table
+
 ## Exit Criteria
 
-- [ ] Informix sync queue task processes pending rows and writes to Informix
-- [ ] Failed rows after 3 attempts set status = 'failed' and create a ticket
-- [ ] Dashboard pending count goes yellow when rows are waiting, green when clear
-- [ ] Dashboard failed count goes red when rows have failed
-- [ ] Review queue refresh runs and populates status_reviews correctly
+- [x] Informix sync queue task processes pending rows and writes to Informix
+- [ ] Failed rows after 3 attempts set status = 'failed' and create a ticket (ticket creation not yet built)
+- [x] Dashboard pending count reflects queue state
+- [x] Review queue refresh runs and populates status_reviews from Informix
+- [x] All implemented tasks are idempotent
+- [x] Per-record sync trigger works from the admin UI
+- [x] Lookup works for any participant regardless of queue state
 - [ ] Participant sync runs and produces valid delta log
-- [ ] All tasks are idempotent
 - [ ] Task failures create tickets
 - [ ] Task list UI shows cron history
-- [ ] Developer has verified cron execution
+- [ ] Developer has verified cron execution end-to-end

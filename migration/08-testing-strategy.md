@@ -94,6 +94,29 @@ Add to `frontend/package.json`:
 
 CI pipeline runs `pnpm check && pnpm test:all` against a running dev stack.
 
+## Implementation Status
+
+| Test file | Status | Notes |
+|---|---|---|
+| `helpers.ts` | [x] Written | Login as admin or CEO; browser setup/teardown |
+| `smoke.test.ts` | [x] Written | Auth flow, navbar, unauthenticated redirect |
+| `data-browser.test.ts` | [x] Written | Query list, master table, pagination, detail |
+| `reviews.test.ts` | [x] Written | Admin queues, send-to-CEO, CEO queue (role gate), CEO decision, history, maintenance mode |
+| `dashboard.test.ts` | [ ] Not written | Blocked on Phase 2 manual verification |
+| `pools.test.ts` | [ ] Not written | Blocked on Phase 3 completion |
+| `questionnaires.test.ts` | [ ] Not written | Blocked on Phase 4 |
+| `reports.test.ts` | [ ] Not written | Blocked on Phase 6 |
+| `background.test.ts` | [ ] Not written | Cron tasks now built (Phase 7); test can be written |
+
+## Known Route Deviations
+
+- **CEO review**: The plan specified `/reviews/ceo/[part_key]` as a separate per-case
+  decision view. A combined scrollable page at `/reviews/ceo` was built instead.
+  The `[part_key]` route file still exists (`reviews/ceo/[part_key]/+page.svelte`,
+  421 lines) as a stale artifact — it should be removed before the reviews test
+  suite is finalised. The role-gate test referencing `/reviews/ceo/some_part_key`
+  in this doc is therefore invalid; adjust to test the combined page instead.
+
 ## Lessons for juryinter
 
 Document any deviations from the planned approach discovered during venue-inter

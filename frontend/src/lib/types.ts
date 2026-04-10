@@ -250,3 +250,39 @@ export interface CeoReviewStateResponse {
 	state: 'live' | 'maintenance';
 }
 
+// ── Sync Status Types ───────────────────────────────────────
+
+export interface SyncStatusRow {
+	part_no: string;
+	pool_no: string;
+	part_key: string;
+	fname: string | null;
+	lname: string | null;
+	review_type: string;
+	ifx_status: string | null;
+	pg_status: string | null;
+	pg_decision: string | null;
+	sync_pending: number;
+	sync_failed: number;
+	sync_errors: string[];
+	/** ok | active | syncing | warning | error | unprocessed */
+	health: 'ok' | 'active' | 'syncing' | 'warning' | 'error' | 'unprocessed';
+	health_reason: string | null;
+}
+
+export interface SyncStatusResponse {
+	rows: SyncStatusRow[];
+	total: number;
+	error_count: number;
+	warning_count: number;
+	syncing_count: number;
+	unprocessed_count: number;
+}
+
+export interface SyncOneResponse {
+	processed: number;
+	succeeded: number;
+	failed: number;
+	errors: string[];
+}
+

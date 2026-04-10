@@ -937,3 +937,632 @@ pub async fn set_ceo_state_handler(
     info!(state = %params.state, actor = %user.sub, "CEO review state toggled");
     Ok(Json(CeoReviewStateResponse { state: params.state }))
 }
+
+// ── Sync status ──────────────────────────────────────────────
+
+#[derive(serde::Serialize)]
+pub struct SyncStatusRow {
+    pub part_no: String,
+    pub pool_no: String,
+    pub part_key: String,
+    pub fname: Option<String>,
+    pub lname: Option<String>,
+    pub review_type: String,
+    /// Current status in Informix review_record ('P' = pending, other = closed/processed).
+    /// None means no review_record row was found for this part_key.
+    pub ifx_status: Option<String>,
+    /// Status in PostgreSQL status_reviews. None means the record hasn't been
+    /// picked up by admin yet (lives only in Informix).
+    pub pg_status: Option<String>,
+    pub pg_decision: Option<String>,
+    /// Pending sync_queue operations for this record.
+    pub sync_pending: i64,
+    /// Failed sync_queue operations for this record.
+    pub sync_failed: i64,
+    /// Error messages from failed sync operations.
+    pub sync_errors: Vec<String>,
+    /// ok | active | syncing | warning | error | unprocessed
+    pub health: String,
+    pub health_reason: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+pub struct SyncStatusResponse {
+    pub rows: Vec<SyncStatusRow>,
+    pub total: usize,
+    pub error_count: usize,
+    pub warning_count: usize,
+    pub syncing_count: usize,
+    pub unprocessed_count: usize,
+}
+
+fn sync_health(
+    ifx_status: Option<&str>,
+    pg_status: Option<&str>,
+    sync_pending: i64,
+    sync_failed: i64,
+) -> (&'static str, Option<&'static str>) {
+    if sync_failed > 0 {
+        return ("error", Some("Sync operation failed — Informix not updated"));
+    }
+    match pg_status {
+        None => match ifx_status {
+            Some("P") => ("unprocessed", None),
+            Some(_) => ("ok", None), // closed in Informix, never needed PG processing
+            None => ("ok", None),
+        },
+        Some(pg) => {
+            let ifx_open = ifx_status == Some("P");
+            let ifx_missing = ifx_status.is_none();
+            match pg {
+                "completed" | "sent_back" => {
+                    if sync_pending > 0 {
+                        ("syncing", None)
+                    } else if ifx_missing {
+                        ("error", Some("Orphan — record in PG but not found in Informix"))
+                    } else if ifx_open {
+                        ("error", Some("Stale — sync complete but Informix review_record still open"))
+                    } else {
+                        ("ok", None)
+                    }
+                }
+                "pending_admin" | "pending_ceo" => {
+                    if ifx_missing {
+                        ("error", Some("Orphan — record in PG but not found in Informix"))
+                    } else if !ifx_open {
+                        ("warning", Some("Informix review_record closed but PG workflow still active"))
+                    } else {
+                        ("active", None)
+                    }
+                }
+                _ => ("ok", None),
+            }
+        }
+    }
+}
+
+/// GET /api/reviews/sync-status
+///
+/// Cross-system view of all review records: Informix review_record vs
+/// PostgreSQL status_reviews vs informix_sync_queue. Shows every record
+/// that is either pending in Informix or has been touched by this app
+/// in PG, along with its sync health.
+pub async fn sync_status_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(_user): Extension<UserSession>,
+) -> ApiResult<SyncStatusResponse> {
+    let pg = state
+        .pg_pool
+        .as_ref()
+        .ok_or_else(|| api_err(StatusCode::SERVICE_UNAVAILABLE, "PostgreSQL not configured"))?;
+
+    // ── 1. PostgreSQL: all status_reviews rows ──────────────
+    #[derive(sqlx::FromRow)]
+    struct PgRow {
+        part_no: String,
+        pool_no: String,
+        part_key: String,
+        review_type: String,
+        status: String,
+        decision: Option<String>,
+    }
+
+    let pg_rows = sqlx::query_as::<_, PgRow>(
+        "SELECT part_no, pool_no, part_key, review_type, status, decision \
+         FROM status_reviews ORDER BY created_at DESC",
+    )
+    .fetch_all(pg)
+    .await
+    .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("PG query failed: {e}")))?;
+
+    // ── 2. PostgreSQL: non-completed sync_queue entries ─────
+    #[derive(sqlx::FromRow)]
+    struct SyncRow {
+        part_no: Option<String>,
+        pool_no: Option<String>,
+        status: String,
+        last_error: Option<String>,
+    }
+
+    let sync_rows = sqlx::query_as::<_, SyncRow>(
+        "SELECT payload->>'part_no' AS part_no, \
+                payload->>'pool_no' AS pool_no, \
+                status, last_error \
+         FROM informix_sync_queue \
+         WHERE status IN ('pending', 'failed')",
+    )
+    .fetch_all(pg)
+    .await
+    .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("Sync queue query failed: {e}")))?;
+
+    // Index sync rows by part_key
+    let mut sync_map: std::collections::HashMap<String, (i64, i64, Vec<String>)> =
+        std::collections::HashMap::new();
+    for sr in sync_rows {
+        if let (Some(pno), Some(plno)) = (sr.part_no, sr.pool_no) {
+            let key = format!("{pno}_{plno}");
+            let entry = sync_map.entry(key).or_insert((0, 0, Vec::new()));
+            if sr.status == "pending" {
+                entry.0 += 1;
+            } else if sr.status == "failed" {
+                entry.1 += 1;
+                if let Some(e) = sr.last_error {
+                    entry.2.push(e);
+                }
+            }
+        }
+    }
+
+    // ── 3. Informix: pending records + all PG-referenced ones ──
+    // Build IN clause from PG part_nos so we can check their current Informix status
+    let pg_part_nos: Vec<i32> = pg_rows
+        .iter()
+        .filter_map(|r| r.part_no.parse::<i32>().ok())
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+
+    // Map of part_key → (fname, lname, ifx_status, review_type)
+    let mut ifx_map: std::collections::HashMap<String, (Option<String>, Option<String>, String, String)> =
+        std::collections::HashMap::new();
+
+    if let Ok(conn) = state.env.connect(
+        &state.config.dsn,
+        &state.config.user,
+        &state.config.password,
+        ConnectionOptions::default(),
+    ) {
+        // All currently pending records
+        let pending_sql = "SELECT rr.part_no, rr.pool_no, rr.review_type, rr.status, \
+                           p.fname, p.lname \
+                           FROM review_record rr \
+                           JOIN participant p ON p.part_no = rr.part_no \
+                           WHERE rr.status = 'P'";
+        if let Ok(Some(mut stmt)) = conn.execute(pending_sql, ()) {
+            if let Ok(mut buf) = TextRowSet::for_cursor(500, &mut stmt, Some(512)) {
+                if let Ok(mut cursor) = stmt.bind_buffer(&mut buf) {
+                    while let Ok(Some(batch)) = cursor.fetch() {
+                        for row in 0..batch.num_rows() {
+                            if let (Some(pno), Some(plno), Some(review_type), Some(status)) = (
+                                col_str(&batch, 0, row),
+                                col_str(&batch, 1, row),
+                                col_str(&batch, 2, row),
+                                col_str(&batch, 3, row),
+                            ) {
+                                let key = format!("{pno}_{plno}");
+                                ifx_map.insert(
+                                    key,
+                                    (col_str(&batch, 4, row), col_str(&batch, 5, row), status, review_type),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Records referenced by PG rows but not already fetched (i.e. already closed)
+        if !pg_part_nos.is_empty() {
+            let in_clause = pg_part_nos
+                .iter()
+                .map(|n| n.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            let closed_sql = format!(
+                "SELECT rr.part_no, rr.pool_no, rr.review_type, rr.status, p.fname, p.lname \
+                 FROM review_record rr \
+                 JOIN participant p ON p.part_no = rr.part_no \
+                 WHERE rr.status != 'P' AND rr.part_no IN ({in_clause})"
+            );
+            if let Ok(Some(mut stmt)) = conn.execute(&closed_sql, ()) {
+                if let Ok(mut buf) = TextRowSet::for_cursor(500, &mut stmt, Some(512)) {
+                    if let Ok(mut cursor) = stmt.bind_buffer(&mut buf) {
+                        while let Ok(Some(batch)) = cursor.fetch() {
+                            for row in 0..batch.num_rows() {
+                                if let (Some(pno), Some(plno), Some(review_type), Some(status)) = (
+                                    col_str(&batch, 0, row),
+                                    col_str(&batch, 1, row),
+                                    col_str(&batch, 2, row),
+                                    col_str(&batch, 3, row),
+                                ) {
+                                    let key = format!("{pno}_{plno}");
+                                    // Don't overwrite 'P' entries already found
+                                    ifx_map.entry(key).or_insert((
+                                        col_str(&batch, 4, row),
+                                        col_str(&batch, 5, row),
+                                        status,
+                                        review_type,
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ── 4. Merge and compute health ──────────────────────────
+
+    // Start with all PG rows
+    let pg_keys: std::collections::HashSet<String> =
+        pg_rows.iter().map(|r| r.part_key.clone()).collect();
+
+    let mut rows: Vec<SyncStatusRow> = pg_rows
+        .into_iter()
+        .map(|pg| {
+            let (sync_pending, sync_failed, sync_errors) = sync_map
+                .get(&pg.part_key)
+                .cloned()
+                .unwrap_or((0, 0, Vec::new()));
+            let (fname, lname, ifx_status) = ifx_map
+                .get(&pg.part_key)
+                .cloned()
+                .map(|(f, l, s, _rt)| (f, l, Some(s)))
+                .unwrap_or((None, None, None));
+            let (health, reason) = sync_health(
+                ifx_status.as_deref(),
+                Some(&pg.status),
+                sync_pending,
+                sync_failed,
+            );
+            SyncStatusRow {
+                part_no: pg.part_no,
+                pool_no: pg.pool_no,
+                part_key: pg.part_key,
+                fname,
+                lname,
+                review_type: pg.review_type,
+                ifx_status,
+                pg_status: Some(pg.status),
+                pg_decision: pg.decision,
+                sync_pending,
+                sync_failed,
+                sync_errors,
+                health: health.to_string(),
+                health_reason: reason.map(|s| s.to_string()),
+            }
+        })
+        .collect();
+
+    // Append Informix-only records (unprocessed — in Informix but not in PG)
+    for (key, (fname, lname, ifx_status, review_type)) in &ifx_map {
+        if pg_keys.contains(key) || ifx_status != "P" {
+            continue; // already covered above, or closed record we don't care about
+        }
+        let (part_no, pool_no) = match key.split_once('_') {
+            Some(p) => (p.0.to_string(), p.1.to_string()),
+            None => continue,
+        };
+        rows.push(SyncStatusRow {
+            part_no,
+            pool_no,
+            part_key: key.clone(),
+            fname: fname.clone(),
+            lname: lname.clone(),
+            review_type: review_type.clone(),
+            ifx_status: Some(ifx_status.clone()),
+            pg_status: None,
+            pg_decision: None,
+            sync_pending: 0,
+            sync_failed: 0,
+            sync_errors: Vec::new(),
+            health: "unprocessed".to_string(),
+            health_reason: None,
+        });
+    }
+
+    let total = rows.len();
+    let error_count = rows.iter().filter(|r| r.health == "error").count();
+    let warning_count = rows.iter().filter(|r| r.health == "warning").count();
+    let syncing_count = rows.iter().filter(|r| r.health == "syncing").count();
+    let unprocessed_count = rows.iter().filter(|r| r.health == "unprocessed").count();
+
+    // Sort: errors first, then warnings, syncing, unprocessed, active, ok
+    let health_order = |h: &str| match h {
+        "error" => 0,
+        "warning" => 1,
+        "syncing" => 2,
+        "unprocessed" => 3,
+        "active" => 4,
+        _ => 5,
+    };
+    rows.sort_by_key(|r| health_order(&r.health));
+
+    Ok(Json(SyncStatusResponse {
+        rows,
+        total,
+        error_count,
+        warning_count,
+        syncing_count,
+        unprocessed_count,
+    }))
+}
+
+// ── Per-record sync trigger ───────────────────────────────────
+
+#[derive(serde::Serialize)]
+pub struct SyncOneResponse {
+    pub processed: usize,
+    pub succeeded: usize,
+    pub failed: usize,
+    pub errors: Vec<String>,
+}
+
+/// POST /api/reviews/sync-status/sync/:part_key
+///
+/// Immediately processes all pending `informix_sync_queue` rows for the
+/// given `part_key`. Returns a summary of what was attempted and any errors.
+pub async fn sync_one_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(_user): Extension<UserSession>,
+    AxumPath(part_key): AxumPath<String>,
+) -> ApiResult<SyncOneResponse> {
+    let pg = state
+        .pg_pool
+        .as_ref()
+        .ok_or_else(|| api_err(StatusCode::SERVICE_UNAVAILABLE, "PostgreSQL not configured"))?;
+
+    let r = crate::sync::process_sync_queue(&state, pg, Some(&part_key)).await;
+
+    Ok(Json(SyncOneResponse {
+        processed: r.processed,
+        succeeded: r.succeeded,
+        failed: r.failed,
+        errors: r.errors,
+    }))
+}
+
+// ── Record lookup ─────────────────────────────────────────────
+
+/// GET /api/reviews/sync-status/lookup/:query
+///
+/// Look up cross-system status for any participant, whether or not they
+/// appear in the main sync-status listing. Accepts either:
+///   • a part_key  (`part_no_pool_no`, e.g. "12345_678") — returns that record
+///   • a part_no   (e.g. "12345") — returns all review records for that participant
+///
+/// Unlike the main listing, this includes ALL Informix review_record statuses
+/// (not only 'P'), giving full visibility into closed / processed records.
+pub async fn lookup_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(_user): Extension<UserSession>,
+    AxumPath(query): AxumPath<String>,
+) -> ApiResult<SyncStatusResponse> {
+    let pg = state
+        .pg_pool
+        .as_ref()
+        .ok_or_else(|| api_err(StatusCode::SERVICE_UNAVAILABLE, "PostgreSQL not configured"))?;
+
+    // Determine whether the query is a part_key or a bare part_no.
+    let (part_no_str, pool_no_filter): (String, Option<String>) =
+        if let Some((pn, pl)) = query.split_once('_') {
+            (pn.to_string(), Some(pl.to_string()))
+        } else {
+            (query.clone(), None)
+        };
+
+    // ── PG: fetch matching status_reviews rows ───────────────
+    #[derive(sqlx::FromRow)]
+    struct PgRow {
+        part_no: String,
+        pool_no: String,
+        part_key: String,
+        review_type: String,
+        status: String,
+        decision: Option<String>,
+    }
+
+    let pg_rows: Vec<PgRow> = match &pool_no_filter {
+        Some(pl) => {
+            let key = format!("{part_no_str}_{pl}");
+            sqlx::query_as::<_, PgRow>(
+                "SELECT part_no, pool_no, part_key, review_type, status, decision \
+                 FROM status_reviews WHERE part_key = $1",
+            )
+            .bind(&key)
+            .fetch_all(pg)
+            .await
+            .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("PG query: {e}")))?
+        }
+        None => {
+            sqlx::query_as::<_, PgRow>(
+                "SELECT part_no, pool_no, part_key, review_type, status, decision \
+                 FROM status_reviews WHERE part_no = $1 ORDER BY created_at DESC",
+            )
+            .bind(&part_no_str)
+            .fetch_all(pg)
+            .await
+            .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("PG query: {e}")))?
+        }
+    };
+
+    // ── PG: sync queue state for matched records ─────────────
+    #[derive(sqlx::FromRow)]
+    struct SyncRow {
+        part_no: Option<String>,
+        pool_no: Option<String>,
+        status: String,
+        last_error: Option<String>,
+    }
+
+    let pg_part_keys: Vec<String> = pg_rows.iter().map(|r| r.part_key.clone()).collect();
+
+    let sync_rows: Vec<SyncRow> = sqlx::query_as::<_, SyncRow>(
+        "SELECT payload->>'part_no' AS part_no, \
+                payload->>'pool_no' AS pool_no, \
+                status, last_error \
+         FROM informix_sync_queue \
+         WHERE status IN ('pending', 'failed') \
+           AND payload->>'part_no' = $1",
+    )
+    .bind(&part_no_str)
+    .fetch_all(pg)
+    .await
+    .unwrap_or_default();
+
+    let mut sync_map: std::collections::HashMap<String, (i64, i64, Vec<String>)> =
+        std::collections::HashMap::new();
+    for sr in sync_rows {
+        if let (Some(pno), Some(plno)) = (sr.part_no, sr.pool_no) {
+            let key = format!("{pno}_{plno}");
+            let entry = sync_map.entry(key).or_insert((0, 0, Vec::new()));
+            if sr.status == "pending" {
+                entry.0 += 1;
+            } else if sr.status == "failed" {
+                entry.1 += 1;
+                if let Some(e) = sr.last_error {
+                    entry.2.push(e);
+                }
+            }
+        }
+    }
+
+    // ── Informix: ALL review_record rows for this part_no ───
+    // (all statuses — gives full history for the lookup view)
+    let mut ifx_map: std::collections::HashMap<String, (Option<String>, Option<String>, String, String)> =
+        std::collections::HashMap::new();
+
+    let part_no_int: Result<i32, _> = part_no_str.parse();
+    if let Ok(pn) = part_no_int {
+        if let Ok(conn) = state.env.connect(
+            &state.config.dsn,
+            &state.config.user,
+            &state.config.password,
+            ConnectionOptions::default(),
+        ) {
+            let sql = match &pool_no_filter {
+                Some(pl) => format!(
+                    "SELECT rr.part_no, rr.pool_no, rr.review_type, rr.status, \
+                            p.fname, p.lname \
+                     FROM review_record rr \
+                     JOIN participant p ON p.part_no = rr.part_no \
+                     WHERE rr.part_no = {pn} AND rr.pool_no = {pl}"
+                ),
+                None => format!(
+                    "SELECT rr.part_no, rr.pool_no, rr.review_type, rr.status, \
+                            p.fname, p.lname \
+                     FROM review_record rr \
+                     JOIN participant p ON p.part_no = rr.part_no \
+                     WHERE rr.part_no = {pn}"
+                ),
+            };
+
+            if let Ok(Some(mut stmt)) = conn.execute(&sql, ()) {
+                if let Ok(mut buf) = TextRowSet::for_cursor(100, &mut stmt, Some(512)) {
+                    if let Ok(mut cursor) = stmt.bind_buffer(&mut buf) {
+                        while let Ok(Some(batch)) = cursor.fetch() {
+                            for row in 0..batch.num_rows() {
+                                if let (Some(part), Some(pool), Some(rt), Some(status)) = (
+                                    col_str(&batch, 0, row),
+                                    col_str(&batch, 1, row),
+                                    col_str(&batch, 2, row),
+                                    col_str(&batch, 3, row),
+                                ) {
+                                    let key = format!("{part}_{pool}");
+                                    ifx_map.insert(
+                                        key,
+                                        (
+                                            col_str(&batch, 4, row),
+                                            col_str(&batch, 5, row),
+                                            status,
+                                            rt,
+                                        ),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ── Merge ────────────────────────────────────────────────
+    let pg_keys: std::collections::HashSet<String> =
+        pg_rows.iter().map(|r| r.part_key.clone()).collect();
+
+    let mut rows: Vec<SyncStatusRow> = pg_rows
+        .into_iter()
+        .map(|pg| {
+            let (sync_pending, sync_failed, sync_errors) = sync_map
+                .get(&pg.part_key)
+                .cloned()
+                .unwrap_or((0, 0, Vec::new()));
+            let (fname, lname, ifx_status) = ifx_map
+                .get(&pg.part_key)
+                .cloned()
+                .map(|(f, l, s, _rt)| (f, l, Some(s)))
+                .unwrap_or((None, None, None));
+            let (health, reason) = sync_health(
+                ifx_status.as_deref(),
+                Some(&pg.status),
+                sync_pending,
+                sync_failed,
+            );
+            SyncStatusRow {
+                part_no: pg.part_no,
+                pool_no: pg.pool_no,
+                part_key: pg.part_key,
+                fname,
+                lname,
+                review_type: pg.review_type,
+                ifx_status,
+                pg_status: Some(pg.status),
+                pg_decision: pg.decision,
+                sync_pending,
+                sync_failed,
+                sync_errors,
+                health: health.to_string(),
+                health_reason: reason.map(|s| s.to_string()),
+            }
+        })
+        .collect();
+
+    // Add Informix-only rows not found in PG
+    for (key, (fname, lname, ifx_status, review_type)) in &ifx_map {
+        if pg_keys.contains(key) {
+            continue;
+        }
+        let (part_no, pool_no) = match key.split_once('_') {
+            Some(p) => (p.0.to_string(), p.1.to_string()),
+            None => continue,
+        };
+        let (sync_pending, sync_failed, sync_errors) = sync_map
+            .get(key)
+            .cloned()
+            .unwrap_or((0, 0, Vec::new()));
+        let health = if ifx_status == "P" { "unprocessed" } else { "ok" };
+        rows.push(SyncStatusRow {
+            part_no,
+            pool_no,
+            part_key: key.clone(),
+            fname: fname.clone(),
+            lname: lname.clone(),
+            review_type: review_type.clone(),
+            ifx_status: Some(ifx_status.clone()),
+            pg_status: None,
+            pg_decision: None,
+            sync_pending,
+            sync_failed,
+            sync_errors,
+            health: health.to_string(),
+            health_reason: None,
+        });
+    }
+
+    let total = rows.len();
+    let error_count = rows.iter().filter(|r| r.health == "error").count();
+    let warning_count = rows.iter().filter(|r| r.health == "warning").count();
+    let syncing_count = rows.iter().filter(|r| r.health == "syncing").count();
+    let unprocessed_count = rows.iter().filter(|r| r.health == "unprocessed").count();
+
+    Ok(Json(SyncStatusResponse {
+        rows,
+        total,
+        error_count,
+        warning_count,
+        syncing_count,
+        unprocessed_count,
+    }))
+}

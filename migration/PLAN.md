@@ -68,8 +68,9 @@ NavBar:  Dashboard │ Pools │ Reviews │ Reports │ Data        [user]
 3. Reviews (/reviews)
    ├── Excuse review (admin queue)          ← admin preps and sends to CEO
    ├── Disqualification review (admin queue)
-   ├── CEO review queue (ceo-review group)  ← narrow view: only prepped cases
-   └── Review records / history
+   ├── CEO review queue (ceo-review group)  ← combined scrollable page, all cases inline
+   ├── Review records / history
+   └── Sync status (/reviews/sync)          ← admin: cross-system Informix/PG/queue health
 
 4. Reports (/reports)
    ├── Race / gender demographics
@@ -134,6 +135,23 @@ Beyond the base tasks/tickets/sessions:
 | `status_reviews` | CEO review queue — admin sends prepped cases here |
 | `review_history` | Full audit trail of every review action |
 | `app_config` | Feature flags (`ceo_review_state`: live/maintenance) |
+| `informix_sync_queue` | Async write-back queue: CEO decisions queue Informix updates here; processed by Phase 7 cron |
+| `document_cache` | WebDAV document cache — TIF files fetched from national system and stored as BYTEA; keyed by `webdav_path` |
+
+## Phase Completion Summary
+
+| Phase | Status | Notes |
+|---|---|---|
+| 1 — Foundation | Complete | Auth, navbar, data browser, Puppeteer harness |
+| 2 — Dashboard | Mostly complete | All remediation pages built; sync failure detail view not built; no E2E tests |
+| 3 — Pool Management | Partial | Pools listing built; draw, seating, participant lookup not built |
+| 4 — Questionnaires | Not started | Doc access covered by document cache (Phase 5 ext.) |
+| 5 — CEO Review | Complete+ | All review workflow built; document caching and sync status added beyond plan |
+| 6 — Reports | Not started | Landing page placeholder only |
+| 7 — Background Processing | Mostly complete | Sync queue + review refresh crons built; participant sync and ticket-on-failure not built |
+| 8 — Testing | Partial | smoke, data-browser, reviews tests written; dashboard/pools/reports/background tests pending |
+
+---
 
 ## Phased Approach
 

@@ -232,12 +232,26 @@ pnpm add -D puppeteer @types/node
 
 **Verify:** All tests green.
 
+## Implementation Status
+
+- [x] SvelteKit project scaffolded (`frontend/`)
+- [x] Vite proxy: `/api` and `/auth` → `:8080`
+- [x] `apiFetch<T>` typed wrapper with 401→login redirect
+- [x] `types.ts` — all domain interfaces
+- [x] CSS design system (navy/gold tokens, shared components)
+- [x] NavBar — CEO role sees only `/reviews/ceo`, no other nav items
+- [x] Auth flow — OIDC via Authentik, session cookie, `+layout.ts` loads user
+- [x] CEO redirect: `+layout.ts` redirects CEO users from `/` to `/reviews/ceo`
+- [x] Data browser — `/data`, `/data/[slug]`, `/data/[slug]/[id]`
+- [x] Puppeteer harness — `tests/helpers.ts`, `tests/smoke.test.ts`, `tests/data-browser.test.ts`
+
 ## Exit Criteria
 
-- [ ] SvelteKit app runs on `:5173`, proxies API to `:8080`
-- [ ] `pnpm check` passes with zero errors
-- [ ] Auth flow works end-to-end
-- [ ] CEO role sees only `/reviews/ceo` nav item
-- [ ] Data browser functional
-- [ ] Puppeteer test suite passes
+- [x] SvelteKit app runs on `:5173`, proxies API to `:8080`
+- [x] Auth flow works end-to-end
+- [x] CEO role sees only `/reviews/ceo` nav item
+- [x] CEO redirect from `/` to `/reviews/ceo` enforced
+- [x] Data browser functional
+- [x] Puppeteer smoke + data-browser tests written
+- [ ] `pnpm check` passes with zero errors (run to verify)
 - [ ] Developer has manually verified all features

@@ -112,6 +112,15 @@ Click a row to open participant detail.
 
 **Verify:** All tests pass.
 
+## Implementation Status
+
+- [x] `/reports` — placeholder landing page only
+- [ ] Demographics report — not built
+- [ ] Address verification report — not built
+- [ ] Participation history report — not built
+- [ ] No backend API endpoints for any report
+- [ ] `reports.test.ts` — not written
+
 ## Exit Criteria
 
 - [ ] All three reports display correct data

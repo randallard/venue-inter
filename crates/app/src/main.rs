@@ -172,6 +172,17 @@ fn main() {
             webdav_config,
         });
 
+        // --- Background cron tasks ---
+        if let Some(ref pool) = state.pg_pool {
+            // Drain informix_sync_queue every 2 minutes.
+            server::sync::spawn_sync_queue_cron(state.clone(), pool.clone());
+            // Pull new Informix review_record rows into PG every 5 minutes.
+            server::sync::spawn_review_refresh_cron(state.clone(), pool.clone());
+            info!("Background cron tasks started (sync_queue: 2 min, review_refresh: 5 min)");
+        } else {
+            tracing::warn!("No PostgreSQL pool — background cron tasks disabled");
+        }
+
         // --- Rate limiting on auth routes (FISMA AC-7 / brute force prevention) ---
         // 2 req/s sustained, burst of 5 — applied per client IP.
         let governor_conf = Arc::new(
@@ -261,6 +272,9 @@ fn main() {
             .route("/api/reviews/ceo-state", post(server::reviews::set_ceo_state_handler))
             .route("/api/reviews/send-to-ceo", post(server::reviews::send_to_ceo_handler))
             .route("/api/reviews/records/{part_no}", get(server::reviews::review_history_handler))
+            .route("/api/reviews/sync-status", get(server::reviews::sync_status_handler))
+            .route("/api/reviews/sync-status/sync/{part_key}", post(server::reviews::sync_one_handler))
+            .route("/api/reviews/sync-status/lookup/{query}", get(server::reviews::lookup_handler))
             // Documents — must be before the bare /{part_key} catch-all
             .route("/api/reviews/{part_key}/documents", get(server::documents::list_documents_handler))
             .route("/api/documents/{id}", get(server::documents::serve_document_handler))

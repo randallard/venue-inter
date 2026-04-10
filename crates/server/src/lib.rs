@@ -4,6 +4,7 @@ pub mod db;
 pub mod api;
 pub mod documents;
 pub mod reviews;
+pub mod sync;
 pub mod tasks;
 pub mod task_runner;
 pub mod email;

@@ -266,19 +266,40 @@ Admin can toggle CEO review to maintenance mode:
 - [x] 5.11 Review history API (`review_history_handler`)
 - [x] 5.12 CEO state toggle (`get_ceo_state_handler`, `set_ceo_state_handler`)
 - [x] Pending counts API (`pending_counts_handler`)
-- [ ] Document viewer endpoint (`/api/reviews/:part_key/document`) — not built
+- [x] Document caching (`crates/server/src/documents.rs`):
+  - `GET /api/reviews/:part_key/documents` — queries Informix `part_image` + `pool.scan_code`, upserts `document_cache`, fires background WebDAV fetch for pending rows
+  - `GET /api/documents/:id` — serves cached bytes as `image/tiff`; 202 while pending, 503 on failure
+- [x] Sync status API (`sync_status_handler`):
+  - `GET /api/reviews/sync-status` — cross-system view merging Informix `review_record`, PG `status_reviews`, and `informix_sync_queue`; computes per-record health (`ok`, `active`, `syncing`, `warning`, `error`, `unprocessed`); sorted by severity
 
 ### Frontend (SvelteKit)
 - [x] 5.2 Admin excuse queue (`/reviews/excuse`)
 - [x] 5.3 Admin disqualify queue (`/reviews/disqualify`)
 - [x] 5.5 Individual review + Send-to-CEO (`/reviews/excuse/[part_key]`, `/reviews/disqualify/[part_key]`)
-- [x] 5.8 CEO queue page (`/reviews/ceo`)
-- [x] 5.9 CEO decision view (`/reviews/ceo/[part_key]`)
+- [x] 5.8 / 5.9 CEO combined scrollable page (`/reviews/ceo`) — **design change from plan**: all pending cases
+  expanded inline with decision forms on a single scrollable page; no separate per-case navigation route.
+  CEO users are redirected here from `/` via `+layout.ts`.
 - [x] 5.11 Review history page (`/reviews/records/[part_no]`)
-- [x] 5.12 CEO state toggle (in CEO queue page)
+- [x] 5.12 CEO state toggle (maintenance mode banner in CEO queue page)
+- [x] Sync status admin page (`/reviews/sync`) — filter chips by health category, table with
+  Informix status / PG status / sync queue state / error details; linked from reviews landing page
 
 ### Testing (5.13)
 - [x] Puppeteer E2E tests written (`tests/reviews.test.ts`); run with `pnpm test:e2e`
+- [ ] E2E tests for document caching and sync status page not yet written
+
+## Notes
+
+- **Document caching**: WebDAV credentials are optional. Set `WEBDAV_BASE_URL`, `WEBDAV_USER`,
+  `WEBDAV_PASSWORD` in `.env`. See `docs/dev-setup.md` §9 for local filesystem testing instructions.
+  The `document_cache` table is in `migrations/init.sql`.
+
+- **Sync status**: The `/reviews/sync` page shows real-time queue health but does **not** process
+  the queue — that is Phase 7 (`sync_informix_queue` cron). The page is an admin diagnostic tool.
+
+- **CEO route change**: The original plan had `/reviews/ceo/[part_key]` as a separate per-case
+  decision view. The implemented design is a single combined scrollable page at `/reviews/ceo`
+  with all cases inline. This was a deliberate UX decision to reduce navigation for the CEO role.
 
 ## Exit Criteria
 
@@ -289,5 +310,7 @@ Admin can toggle CEO review to maintenance mode:
 - [x] Send back to admin returns record
 - [x] Review history shows complete audit trail
 - [x] CEO maintenance mode works
+- [x] Document metadata returned for participants with `part_image` records
+- [x] Sync status page shows cross-system health for all ex/dq records
 - [ ] All Puppeteer tests pass (run `pnpm test:e2e` after verifying locally)
-- [ ] Developer has verified full workflow
+- [ ] Developer has verified full workflow locally
