@@ -6,8 +6,16 @@ export default defineConfig({
 	server: {
 		port: 5173,
 		proxy: {
-			'/api': 'http://localhost:8080',
-			'/auth': 'http://localhost:8080'
+			'/api': {
+				target: 'http://localhost:8080',
+				// Inject X-Forwarded-For so the rate limiter (SmartIpKeyExtractor)
+				// can extract a client IP from header instead of ConnectInfo.
+				headers: { 'X-Forwarded-For': '127.0.0.1' }
+			},
+			'/auth': {
+				target: 'http://localhost:8080',
+				headers: { 'X-Forwarded-For': '127.0.0.1' }
+			}
 		}
 	}
 });

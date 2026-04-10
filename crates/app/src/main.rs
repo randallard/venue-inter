@@ -4,6 +4,36 @@ mod components;
 use dioxus::prelude::*;
 use routes::Route;
 
+/// Rate-limiter key extractor: tries X-Forwarded-For / X-Real-IP / peer addr
+/// (via SmartIpKeyExtractor), then falls back to a shared "local" bucket
+/// instead of returning an error.  This handles the case where the Vite dev
+/// proxy or Dioxus's serve() hasn't populated ConnectInfo.
+#[cfg(feature = "server")]
+mod rate_limit {
+    use std::net::IpAddr;
+    use axum::http::Request;
+    use tower_governor::{errors::GovernorError, key_extractor::{KeyExtractor, SmartIpKeyExtractor}};
+
+    #[derive(Clone, Debug)]
+    pub struct FallbackIpExtractor;
+
+    impl KeyExtractor for FallbackIpExtractor {
+        type Key = String;
+
+        #[cfg(feature = "tracing")]
+        fn name(&self) -> &'static str { "fallback_ip" }
+
+        fn extract<T>(&self, req: &Request<T>) -> Result<Self::Key, GovernorError> {
+            SmartIpKeyExtractor
+                .extract(req)
+                .map(|ip: IpAddr| ip.to_string())
+                // No IP available (e.g. direct connection without ConnectInfo):
+                // use a shared "local" bucket so the limiter still applies.
+                .or_else(|_| Ok("local".to_string()))
+        }
+    }
+}
+
 fn main() {
     #[cfg(not(feature = "server"))]
     dioxus::launch(app);
@@ -27,6 +57,7 @@ fn main() {
         use tower_sessions_sqlx_store::PostgresStore;
         use tower_governor::GovernorLayer;
         use tower_governor::governor::GovernorConfigBuilder;
+        use crate::rate_limit::FallbackIpExtractor;
         use tracing::info;
 
         use server::auth::types::OidcConfig;
@@ -121,6 +152,14 @@ fn main() {
             }
         };
 
+        // --- WebDAV config (optional — document caching disabled when absent) ---
+        let webdav_config = db::WebDavConfig::from_env();
+        if webdav_config.is_some() {
+            info!("WebDAV document cache configured");
+        } else {
+            info!("WEBDAV_BASE_URL not set — document caching disabled");
+        }
+
         // --- Build state ---
         let state = Arc::new(AppState {
             env,
@@ -130,12 +169,14 @@ fn main() {
             http_client,
             pg_pool,
             email_config,
+            webdav_config,
         });
 
         // --- Rate limiting on auth routes (FISMA AC-7 / brute force prevention) ---
         // 2 req/s sustained, burst of 5 — applied per client IP.
         let governor_conf = Arc::new(
             GovernorConfigBuilder::default()
+                .key_extractor(FallbackIpExtractor)
                 .per_second(2)
                 .burst_size(5)
                 .finish()
@@ -220,6 +261,9 @@ fn main() {
             .route("/api/reviews/ceo-state", post(server::reviews::set_ceo_state_handler))
             .route("/api/reviews/send-to-ceo", post(server::reviews::send_to_ceo_handler))
             .route("/api/reviews/records/{part_no}", get(server::reviews::review_history_handler))
+            // Documents — must be before the bare /{part_key} catch-all
+            .route("/api/reviews/{part_key}/documents", get(server::documents::list_documents_handler))
+            .route("/api/documents/{id}", get(server::documents::serve_document_handler))
             // Parameterized last
             .route("/api/reviews/{part_key}", get(server::reviews::review_detail_handler))
             .layer(cache_no_store)

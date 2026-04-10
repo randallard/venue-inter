@@ -77,6 +77,26 @@ impl EmailConfig {
     }
 }
 
+pub struct WebDavConfig {
+    pub base_url: String,
+    pub user: String,
+    pub password: String,
+}
+
+impl WebDavConfig {
+    pub fn from_env() -> Option<Self> {
+        let base_url = env::var("WEBDAV_BASE_URL").ok()?.trim().to_string();
+        if base_url.is_empty() {
+            return None;
+        }
+        Some(Self {
+            base_url,
+            user: env::var("WEBDAV_USER").unwrap_or_default(),
+            password: env::var("WEBDAV_PASSWORD").unwrap_or_default(),
+        })
+    }
+}
+
 pub fn create_odbc_env() -> Result<Environment> {
     Environment::new().context("Failed to create ODBC environment")
 }

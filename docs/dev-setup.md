@@ -264,7 +264,98 @@ Or export them in your shell / add to a local `.env.test` file and load with
 
 ---
 
-## 9. Troubleshooting
+## 9. Document caching (WebDAV)
+
+The backend fetches scanned questionnaires and supporting documents from the
+national system's WebDAV file server and caches them in the `document_cache`
+PostgreSQL table so the CEO review page doesn't reach out to the external
+server on every load.
+
+### Environment variables
+
+| Variable | Description |
+|---|---|
+| `WEBDAV_BASE_URL` | Base URL of the WebDAV server — leave empty to disable |
+| `WEBDAV_USER` | Basic auth username |
+| `WEBDAV_PASSWORD` | Basic auth password |
+
+Document caching is **optional**. If `WEBDAV_BASE_URL` is not set, the
+`/api/reviews/:part_key/documents` endpoint still returns document metadata
+from Informix but skips the fetch and logs a warning.
+
+### Database migration
+
+The `document_cache` table is in `migrations/init.sql` and is created
+automatically on a fresh volume. To add it to an existing dev database
+without wiping data:
+
+```bash
+docker exec -i venueinter-db psql -U venueinter -d venueinter <<'SQL'
+CREATE TABLE IF NOT EXISTS document_cache (
+    id           UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    part_no      TEXT        NOT NULL,
+    webdav_path  TEXT        NOT NULL UNIQUE,
+    file_name    TEXT        NOT NULL,
+    data         BYTEA,
+    fetch_status TEXT        NOT NULL DEFAULT 'pending',
+    fetch_error  TEXT,
+    fetched_at   TIMESTAMPTZ,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_document_cache_part_no ON document_cache(part_no);
+SQL
+```
+
+### Testing with a local filesystem
+
+WebDAV GET is plain HTTP, so Python's built-in file server works as a
+stand-in. The credentials in the env vars are sent but ignored by the server.
+
+1. Create a directory tree matching `file_path || file_name` from `part_image`
+   for a participant you want to test with:
+
+   ```bash
+   mkdir -p test-webdav/some_path/
+   cp some-scan.tif \
+     test-webdav/some_path/q_101102481_02162023_135939_000011.tif
+   ```
+
+2. Serve it (from the `test-webdav/` directory):
+
+   ```bash
+   cd test-webdav && python -m http.server 8001
+   ```
+
+3. Add to `.env`:
+
+   ```
+   WEBDAV_BASE_URL=http://localhost:8001
+   WEBDAV_USER=test
+   WEBDAV_PASSWORD=test
+   ```
+
+4. Restart the backend, then verify:
+
+   ```bash
+   # List documents for a review (requires auth cookie — use browser or curl with session)
+   curl -b 'session=...' http://localhost:8080/api/reviews/101102481_3489/documents
+
+   # Check cache state directly in postgres
+   docker exec -i venueinter-db psql -U venueinter -d venueinter -c \
+     "SELECT id, file_name, fetch_status, fetched_at, octet_length(data) FROM document_cache;"
+   ```
+
+   The first call returns `fetch_status: "pending"` immediately and fires a
+   background fetch. Re-run the psql query after a moment — it should show
+   `"cached"` with a non-null byte count.
+
+> **Path matching**: `file_path` from Informix is used verbatim (it includes
+> a trailing slash). Your local directory structure must match exactly what's
+> stored in `part_image` for the participant you're testing.
+
+---
+
+## 10. Troubleshooting
 
 **E2E tests fail with "Login failed" or hang on Authentik page**
 

@@ -31,6 +31,8 @@ entries:
       client_id: !Env [OIDC_CLIENT_ID, venueinter-dev-client-id]
       client_secret: !Env [OIDC_CLIENT_SECRET, venueinter-dev-client-secret]
       redirect_uris:
+        - url: "http://localhost:5173/auth/callback"
+          matching_mode: strict
         - url: "http://localhost:8080/auth/callback"
           matching_mode: strict
       access_code_validity: "minutes=10"

@@ -107,6 +107,23 @@ CREATE INDEX IF NOT EXISTS idx_review_history_rev_id  ON review_history(status_r
 CREATE INDEX IF NOT EXISTS idx_sync_queue_status      ON informix_sync_queue(status)
     WHERE status != 'completed';
 
+-- Document cache: TIF files pulled from the WebDAV server and stored locally
+-- so the CEO review page can serve them without hitting the national system
+-- on every request. fetch_status: 'pending' | 'cached' | 'failed'.
+CREATE TABLE IF NOT EXISTS document_cache (
+    id           UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    part_no      TEXT        NOT NULL,
+    webdav_path  TEXT        NOT NULL UNIQUE,  -- file_path || file_name from part_image
+    file_name    TEXT        NOT NULL,
+    data         BYTEA,
+    fetch_status TEXT        NOT NULL DEFAULT 'pending',
+    fetch_error  TEXT,
+    fetched_at   TIMESTAMPTZ,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_document_cache_part_no ON document_cache(part_no);
+
 -- Note: the `tower_sessions` table (for persistent session storage) is created
 -- automatically at startup by PostgresStore::migrate(). It does not need to
 -- be defined here.

@@ -2,6 +2,7 @@ pub mod audit;
 pub mod auth;
 pub mod db;
 pub mod api;
+pub mod documents;
 pub mod reviews;
 pub mod tasks;
 pub mod task_runner;
@@ -26,4 +27,5 @@ pub struct AppState {
     pub http_client: reqwest::Client,
     pub pg_pool: Option<sqlx::PgPool>,
     pub email_config: Option<EmailConfig>,
+    pub webdav_config: Option<db::WebDavConfig>,
 }
