@@ -28,28 +28,13 @@
 	let rowStates = $state<Record<number, RowState>>({});
 	let rowMessages = $state<Record<number, string>>({});
 
-	// Confirmation modal
-	let confirmRow = $state<BlankQQRow | null>(null);
-
-	function openConfirm(row: BlankQQRow) {
-		confirmRow = row;
-	}
-
-	function closeConfirm() {
-		confirmRow = null;
-	}
-
-	async function doReset() {
-		if (!confirmRow) return;
-		const pm_id = confirmRow.pm_id;
-		confirmRow = null;
+	async function doReset(pm_id: number) {
 		rowStates[pm_id] = 'pending';
 		try {
 			const res = await resetQQ(pm_id);
 			rowStates[pm_id] = res.ok ? 'ok' : 'err';
 			rowMessages[pm_id] = res.message;
 			if (res.ok) {
-				// Fade out after brief delay
 				setTimeout(() => {
 					rows = rows.filter((r) => r.pm_id !== pm_id);
 				}, 1200);
@@ -137,7 +122,7 @@
 									{:else if rowStates[row.pm_id] === 'err'}
 										<span class="error" title={rowMessages[row.pm_id]}>Failed</span>
 									{:else}
-										<button class="btn btn-primary btn-sm" onclick={() => openConfirm(row)}>
+										<button class="btn btn-primary btn-sm" onclick={() => doReset(row.pm_id)}>
 											Reset QQ
 										</button>
 									{/if}
@@ -150,30 +135,6 @@
 		{/if}
 	{/if}
 </div>
-
-{#if confirmRow}
-	<div class="modal-overlay" role="dialog" aria-modal="true">
-		<div class="modal-content">
-			<div class="modal-header">
-				<h2>Reset Questionnaire</h2>
-				<button class="modal-close" onclick={closeConfirm} aria-label="Close">×</button>
-			</div>
-			<div class="modal-body">
-				<p>
-					Reset the questionnaire for <strong>{confirmRow.fname} {confirmRow.lname}</strong>
-					(PM ID {confirmRow.pm_id}, Pool #{confirmRow.pool_no})?
-				</p>
-				<p class="text-muted" style="font-size: 0.88rem;">
-					This sets responded = 'N' and clears scan_code. The member will need to re-submit.
-				</p>
-				<div class="modal-actions">
-					<button class="btn btn-danger" onclick={doReset}>Reset</button>
-					<button class="btn btn-secondary" onclick={closeConfirm}>Cancel</button>
-				</div>
-			</div>
-		</div>
-	</div>
-{/if}
 
 <style>
 	.toolbar {

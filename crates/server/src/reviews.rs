@@ -15,7 +15,7 @@ use shared_types::{
     ActionResponse, AdminReviewQueue, AdminReviewRow, CeoDecideParams, CeoReviewQueue,
     CeoReviewRow, CeoReviewStateResponse, DecideResponse, ErrorResponse, PendingCountsResponse,
     ReviewDetail, ReviewHistoryEntry, ReviewHistoryResponse, SendToCeoParams, SetCeoStateParams,
-    UserSession,
+    UnifiedReviewQueue, UnifiedReviewRow, UserSession,
 };
 
 type ApiResult<T> = Result<Json<T>, (StatusCode, Json<ErrorResponse>)>;
@@ -812,77 +812,33 @@ pub async fn pending_counts_handler(
     State(state): State<Arc<AppState>>,
     Extension(_user): Extension<UserSession>,
 ) -> ApiResult<PendingCountsResponse> {
-    let conn = state
-        .env
-        .connect(
-            &state.config.dsn,
-            &state.config.user,
-            &state.config.password,
-            ConnectionOptions::default(),
-        )
-        .map_err(|e| api_err(StatusCode::SERVICE_UNAVAILABLE, format!("DB connection failed: {e}")))?;
+    let pg = state
+        .pg_pool
+        .as_ref()
+        .ok_or_else(|| api_err(StatusCode::SERVICE_UNAVAILABLE, "PostgreSQL not configured"))?;
 
-    let excuse_pending = {
-        let mut stmt = conn
-            .execute(
-                "SELECT COUNT(*) FROM review_record WHERE status = 'P' AND review_type = 'excuse'",
-                (),
-            )
-            .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("Query failed: {e}")))?
-            .ok_or_else(|| api_err(StatusCode::INTERNAL_SERVER_ERROR, "No result set"))?;
-        let mut buf = TextRowSet::for_cursor(1, &mut stmt, Some(64))
-            .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("Buffer: {e}")))?;
-        let mut cursor = stmt
-            .bind_buffer(&mut buf)
-            .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("Bind: {e}")))?;
-        cursor
-            .fetch()
-            .ok()
-            .flatten()
-            .and_then(|b| col_str(&b, 0, 0))
-            .and_then(|s| s.parse::<i64>().ok())
-            .unwrap_or(0)
-    };
+    #[derive(sqlx::FromRow)]
+    struct Counts {
+        excuse_pending: i64,
+        disqualify_pending: i64,
+        ceo_queue: i64,
+    }
 
-    let disqualify_pending = {
-        let mut stmt = conn
-            .execute(
-                "SELECT COUNT(*) FROM review_record WHERE status = 'P' AND review_type = 'disqualify'",
-                (),
-            )
-            .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("Query failed: {e}")))?
-            .ok_or_else(|| api_err(StatusCode::INTERNAL_SERVER_ERROR, "No result set"))?;
-        let mut buf = TextRowSet::for_cursor(1, &mut stmt, Some(64))
-            .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("Buffer: {e}")))?;
-        let mut cursor = stmt
-            .bind_buffer(&mut buf)
-            .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("Bind: {e}")))?;
-        cursor
-            .fetch()
-            .ok()
-            .flatten()
-            .and_then(|b| col_str(&b, 0, 0))
-            .and_then(|s| s.parse::<i64>().ok())
-            .unwrap_or(0)
-    };
-
-    drop(conn);
-
-    let ceo_queue = if let Some(pg) = &state.pg_pool {
-        sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM status_reviews WHERE status = 'pending_ceo'",
-        )
-        .fetch_one(pg)
-        .await
-        .unwrap_or(0)
-    } else {
-        0
-    };
+    let counts = sqlx::query_as::<_, Counts>(
+        "SELECT \
+            COUNT(*) FILTER (WHERE status = 'pending_admin' AND review_type = 'excuse')     AS excuse_pending, \
+            COUNT(*) FILTER (WHERE status = 'pending_admin' AND review_type = 'disqualify') AS disqualify_pending, \
+            COUNT(*) FILTER (WHERE status = 'pending_ceo')                                  AS ceo_queue \
+         FROM status_reviews",
+    )
+    .fetch_one(pg)
+    .await
+    .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("Query failed: {e}")))?;
 
     Ok(Json(PendingCountsResponse {
-        excuse_pending,
-        disqualify_pending,
-        ceo_queue,
+        excuse_pending: counts.excuse_pending,
+        disqualify_pending: counts.disqualify_pending,
+        ceo_queue: counts.ceo_queue,
     }))
 }
 
@@ -992,7 +948,7 @@ fn sync_health(
             None => ("ok", None),
         },
         Some(pg) => {
-            let ifx_open = ifx_status == Some("P");
+            let ifx_open = matches!(ifx_status, Some("P") | Some("S"));
             let ifx_missing = ifx_status.is_none();
             match pg {
                 "completed" | "sent_back" => {
@@ -1565,4 +1521,241 @@ pub async fn lookup_handler(
         syncing_count,
         unprocessed_count,
     }))
+}
+
+// ── Unified queue ─────────────────────────────────────────────
+
+#[derive(serde::Deserialize)]
+pub struct UnifiedQueueParams {
+    #[serde(rename = "type")]
+    review_type: Option<String>,
+    status: Option<String>,
+}
+
+/// GET /api/reviews/queue  — any authenticated user.
+/// Optional: ?type=excuse|disqualify  ?status=pending_admin|pending_ceo|completed|sent_back
+pub async fn unified_queue_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(_user): Extension<UserSession>,
+    axum::extract::Query(params): axum::extract::Query<UnifiedQueueParams>,
+) -> ApiResult<UnifiedReviewQueue> {
+    let pg = state
+        .pg_pool
+        .as_ref()
+        .ok_or_else(|| api_err(StatusCode::SERVICE_UNAVAILABLE, "PostgreSQL not configured"))?;
+
+    #[derive(sqlx::FromRow)]
+    struct ConfigRow { key: String, value: String }
+    let cfg_rows: Vec<ConfigRow> = sqlx::query_as(
+        "SELECT key, value FROM app_config \
+         WHERE key IN ('ceo_review_state', 'show_review_notes', 'show_send_back')",
+    )
+    .fetch_all(pg)
+    .await
+    .unwrap_or_default();
+    let cfg: std::collections::HashMap<String, String> =
+        cfg_rows.into_iter().map(|r| (r.key, r.value)).collect();
+
+    let maintenance  = cfg.get("ceo_review_state").map(|v| v == "maintenance").unwrap_or(false);
+    let show_notes     = cfg.get("show_review_notes").map(|v| v != "false").unwrap_or(true);
+    let show_send_back = cfg.get("show_send_back").map(|v| v != "false").unwrap_or(true);
+
+    let type_filter = params.review_type.filter(|t| t != "all" && !t.is_empty());
+    let status_filter = params.status.filter(|s| s != "all" && !s.is_empty());
+
+    #[derive(sqlx::FromRow)]
+    struct PgRow {
+        id: Uuid,
+        part_no: String,
+        pool_no: String,
+        part_key: String,
+        review_type: String,
+        status: String,
+        admin_notes: Option<String>,
+        ceo_notes: Option<String>,
+        decision: Option<String>,
+        sent_to_ceo_at: Option<chrono::DateTime<chrono::Utc>>,
+        created_at: chrono::DateTime<chrono::Utc>,
+    }
+
+    let pg_rows = sqlx::query_as::<_, PgRow>(
+        "SELECT id, part_no, pool_no, part_key, review_type, status, \
+         admin_notes, ceo_notes, decision, sent_to_ceo_at, created_at \
+         FROM status_reviews \
+         WHERE ($1::text IS NULL OR review_type = $1) \
+           AND ($2::text IS NULL OR status = $2) \
+         ORDER BY created_at DESC",
+    )
+    .bind(&type_filter)
+    .bind(&status_filter)
+    .fetch_all(pg)
+    .await
+    .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("PG query failed: {e}")))?;
+
+    let part_nos: Vec<i32> = pg_rows
+        .iter()
+        .filter_map(|r| r.part_no.parse::<i32>().ok())
+        .collect::<std::collections::HashSet<i32>>()
+        .into_iter()
+        .collect();
+
+    let name_map: std::collections::HashMap<i32, (Option<String>, Option<String>)> =
+        if part_nos.is_empty() {
+            std::collections::HashMap::new()
+        } else {
+            let in_clause = part_nos
+                .iter()
+                .map(|n| n.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            let name_sql = format!(
+                "SELECT part_no, fname, lname FROM participant WHERE part_no IN ({in_clause})"
+            );
+            let mut map = std::collections::HashMap::new();
+            if let Ok(conn) = state.env.connect(
+                &state.config.dsn,
+                &state.config.user,
+                &state.config.password,
+                ConnectionOptions::default(),
+            ) {
+                if let Ok(Some(mut stmt)) = conn.execute(&name_sql, ()) {
+                    if let Ok(mut buf) = TextRowSet::for_cursor(500, &mut stmt, Some(256)) {
+                        if let Ok(mut cursor) = stmt.bind_buffer(&mut buf) {
+                            while let Ok(Some(batch)) = cursor.fetch() {
+                                for row in 0..batch.num_rows() {
+                                    if let Some(pno) = col_str(&batch, 0, row)
+                                        .and_then(|s| s.parse::<i32>().ok())
+                                    {
+                                        map.insert(
+                                            pno,
+                                            (col_str(&batch, 1, row), col_str(&batch, 2, row)),
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            map
+        };
+
+    let rows: Vec<UnifiedReviewRow> = pg_rows
+        .into_iter()
+        .map(|r| {
+            let pno: i32 = r.part_no.parse().unwrap_or(0);
+            let (fname, lname) = name_map.get(&pno).cloned().unwrap_or((None, None));
+            UnifiedReviewRow {
+                id: r.id.to_string(),
+                part_no: r.part_no,
+                pool_no: r.pool_no,
+                part_key: r.part_key,
+                fname,
+                lname,
+                review_type: r.review_type,
+                status: r.status,
+                admin_notes: r.admin_notes,
+                ceo_notes: r.ceo_notes,
+                decision: r.decision,
+                sent_to_ceo_at: r.sent_to_ceo_at.map(|t| t.to_rfc3339()),
+                created_at: r.created_at.to_rfc3339(),
+            }
+        })
+        .collect();
+
+    let count = rows.len();
+    Ok(Json(UnifiedReviewQueue { rows, count, maintenance, show_notes, show_send_back }))
+}
+
+// ── Recall ────────────────────────────────────────────────────
+
+/// POST /api/reviews/:part_key/recall  — pending_ceo → pending_admin.
+pub async fn recall_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(user): Extension<UserSession>,
+    AxumPath(part_key): AxumPath<String>,
+) -> ApiResult<ActionResponse> {
+    let pg = state
+        .pg_pool
+        .as_ref()
+        .ok_or_else(|| api_err(StatusCode::SERVICE_UNAVAILABLE, "PostgreSQL not configured"))?;
+
+    let (part_no, pool_no) = parse_part_key(&part_key)
+        .ok_or_else(|| api_err(StatusCode::BAD_REQUEST, "Invalid part_key"))?;
+
+    let current: Option<String> =
+        sqlx::query_scalar("SELECT status FROM status_reviews WHERE part_key = $1")
+            .bind(&part_key)
+            .fetch_optional(pg)
+            .await
+            .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("Query failed: {e}")))?;
+
+    if current.as_deref() != Some("pending_ceo") {
+        return Err(api_err(
+            StatusCode::CONFLICT,
+            format!(
+                "Cannot recall — status is '{}'",
+                current.as_deref().unwrap_or("not found")
+            ),
+        ));
+    }
+
+    let affected = sqlx::query(
+        "UPDATE status_reviews \
+         SET status = 'pending_admin', sent_to_ceo_at = NULL, ceo_notes = NULL, \
+             updated_at = now() \
+         WHERE part_key = $1 AND status = 'pending_ceo'",
+    )
+    .bind(&part_key)
+    .execute(pg)
+    .await
+    .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("Update failed: {e}")))?
+    .rows_affected();
+
+    if affected == 0 {
+        return Err(api_err(
+            StatusCode::CONFLICT,
+            "Record no longer pending CEO — may have been decided concurrently",
+        ));
+    }
+
+    sqlx::query(
+        "INSERT INTO informix_sync_queue (operation, payload) VALUES ('reopen_review_record', $1)",
+    )
+    .bind(serde_json::json!({ "part_no": part_no, "pool_no": pool_no }))
+    .execute(pg)
+    .await
+    .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("Sync queue: {e}")))?;
+
+    sqlx::query(
+        "INSERT INTO review_history \
+         (status_review_id, part_no, review_type, action, actor_sub, actor_email) \
+         SELECT id, part_no, review_type, 'recalled', $1, $2 \
+         FROM status_reviews WHERE part_key = $3",
+    )
+    .bind(&user.sub)
+    .bind(&user.email)
+    .bind(&part_key)
+    .execute(pg)
+    .await
+    .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("History: {e}")))?;
+
+    info!(part_key = %part_key, actor = %user.sub, "Review recalled from CEO queue");
+    Ok(Json(ActionResponse { ok: true, message: "Recalled to admin queue".to_string() }))
+}
+
+// ── Sync now ──────────────────────────────────────────────────
+
+/// POST /api/reviews/sync-now — triggers immediate review queue refresh from Informix.
+pub async fn sync_now_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(_user): Extension<UserSession>,
+) -> ApiResult<serde_json::Value> {
+    let pg = state
+        .pg_pool
+        .as_ref()
+        .ok_or_else(|| api_err(StatusCode::SERVICE_UNAVAILABLE, "PostgreSQL not configured"))?;
+    let inserted = crate::sync::refresh_review_queue(&state, pg).await;
+    info!(inserted, "Manual review queue sync triggered");
+    Ok(axum::Json(serde_json::json!({ "inserted": inserted })))
 }

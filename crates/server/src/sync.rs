@@ -102,6 +102,7 @@ fn execute_informix_op(
     // Connection is dropped here (before any await), keeping it off async executor.
     conn.execute(&sql, ())
         .map_err(|e| format!("Informix execute failed: {e}"))?;
+    conn.execute("COMMIT WORK", ()).ok();
 
     Ok(())
 }

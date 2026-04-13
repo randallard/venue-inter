@@ -1,8 +1,8 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { page } from '$app/stores';
-	import { getReviewDetail, sendToCeo } from '$lib/api';
-	import type { ReviewDetail } from '$lib/types';
+	import { getReviewDetail, sendToCeo, listDocuments } from '$lib/api';
+	import type { ReviewDetail, DocumentsResponse, DocumentMeta } from '$lib/types';
 
 	const part_key = $derived($page.params.part_key ?? '');
 
@@ -65,7 +65,20 @@
 		detail?.pg_status === 'pending_ceo' || detail?.pg_status === 'completed' || detail?.pg_status === 'sent_back'
 	);
 
-	onMount(load);
+	let docs = $state<DocumentsResponse | null>(null);
+	let docsLoading = $state(true);
+	let viewingDoc = $state<DocumentMeta | null>(null);
+
+	async function loadDocs() {
+		docsLoading = true;
+		try { docs = await listDocuments(part_key); }
+		catch { docs = null; }
+		finally { docsLoading = false; }
+	}
+
+	const hasPending = $derived(docs?.documents.some(d => d.fetch_status === 'pending') ?? false);
+
+	onMount(() => { load(); loadDocs(); });
 </script>
 
 <div class="container">
@@ -152,6 +165,39 @@
 			</table>
 		</div>
 
+		<!-- Documents -->
+		<div class="card" style="margin-top: 1rem;">
+			<div class="docs-header">
+				<h2>Documents</h2>
+				{#if hasPending}
+					<button class="btn-refresh" onclick={loadDocs}>Refresh</button>
+				{/if}
+			</div>
+			{#if docsLoading}
+				<p class="text-muted" style="font-size:0.88rem">Loading…</p>
+			{:else if !docs || docs.documents.length === 0}
+				<p class="text-muted" style="font-size:0.88rem">No documents on file.</p>
+			{:else}
+				{#if docs.scan_code}
+					<p class="scan-badge">{docs.scan_code === 'web' ? 'Submitted online' : `Scan batch: ${docs.scan_code}`}</p>
+				{/if}
+				<ul class="doc-list">
+					{#each docs.documents as doc}
+						<li class="doc-row">
+							<span class="doc-name">{doc.file_name}</span>
+							{#if doc.fetch_status === 'cached'}
+								<button class="btn-view" onclick={() => viewingDoc = doc}>View</button>
+							{:else if doc.fetch_status === 'pending'}
+								<span class="doc-status pending">Fetching…</span>
+							{:else}
+								<span class="doc-status failed">Unavailable</span>
+							{/if}
+						</li>
+					{/each}
+				</ul>
+			{/if}
+		</div>
+
 		<!-- Admin notes + send to CEO -->
 		{#if detail.pg_status !== 'completed'}
 			<div class="card action-card" style="margin-top: 1rem;">
@@ -203,6 +249,19 @@
 	{/if}
 </div>
 
+{#if viewingDoc}
+	<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+	<div class="doc-overlay" onclick={() => viewingDoc = null}>
+		<div class="doc-viewer" onclick={(e) => e.stopPropagation()}>
+			<div class="doc-viewer-header">
+				<span class="doc-viewer-name">{viewingDoc.file_name}</span>
+				<button class="doc-close" onclick={() => viewingDoc = null}>✕</button>
+			</div>
+			<img src="/api/documents/{viewingDoc.id}" alt={viewingDoc.file_name} class="doc-img" />
+		</div>
+	</div>
+{/if}
+
 <style>
 	.detail-grid {
 		display: grid;
@@ -244,10 +303,28 @@
 
 	.msg-ok { color: var(--green); font-weight: 600; }
 
-	.nav-row {
-		display: flex;
-		gap: 1rem;
-		align-items: center;
-		margin-bottom: 0.5rem;
-	}
+	.nav-row { display: flex; gap: 1rem; align-items: center; margin-bottom: 0.5rem; }
+
+	.docs-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.6rem; }
+	.docs-header h2 { margin: 0; }
+	.btn-refresh { font-size: 0.8rem; padding: 0.2rem 0.6rem; background: none; border: 1px solid var(--border); border-radius: var(--radius-sm); cursor: pointer; color: var(--text-muted); }
+	.btn-refresh:hover { border-color: var(--navy); color: var(--navy); }
+	.scan-badge { font-size: 0.8rem; color: var(--gold); font-weight: 600; margin: 0 0 0.6rem; }
+	.doc-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.4rem; }
+	.doc-row { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; padding: 0.35rem 0; border-bottom: 1px solid var(--border); }
+	.doc-row:last-child { border-bottom: none; }
+	.doc-name { font-size: 0.85rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+	.btn-view { flex-shrink: 0; font-size: 0.8rem; padding: 0.2rem 0.65rem; background: var(--navy); color: #fff; border: none; border-radius: var(--radius-sm); cursor: pointer; }
+	.btn-view:hover { background: var(--navy-light); }
+	.doc-status { flex-shrink: 0; font-size: 0.78rem; font-weight: 600; }
+	.doc-status.pending { color: var(--gold); }
+	.doc-status.failed { color: var(--red); }
+
+	.doc-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.75); display: flex; align-items: center; justify-content: center; z-index: 1000; }
+	.doc-viewer { background: #fff; border-radius: var(--radius); overflow: hidden; max-width: 90vw; max-height: 90vh; display: flex; flex-direction: column; box-shadow: 0 8px 32px rgba(0,0,0,0.4); }
+	.doc-viewer-header { display: flex; align-items: center; justify-content: space-between; padding: 0.6rem 1rem; background: var(--navy); color: #fff; }
+	.doc-viewer-name { font-size: 0.88rem; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+	.doc-close { background: none; border: none; color: rgba(255,255,255,0.8); font-size: 1.1rem; cursor: pointer; padding: 0 0.25rem; flex-shrink: 0; }
+	.doc-close:hover { color: #fff; }
+	.doc-img { max-width: 85vw; max-height: calc(90vh - 44px); object-fit: contain; display: block; }
 </style>

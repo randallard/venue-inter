@@ -213,7 +213,7 @@ CREATE TABLE review_record (
     pool_no         INTEGER      NOT NULL,
     review_type     CHAR(10)     NOT NULL,   -- 'excuse' or 'disqualify'
     status          CHAR(1)      DEFAULT 'P',
-    admin_notes     VARCHAR(500),
+    admin_notes     LVARCHAR(500),
     submitted_date  DATE         DEFAULT TODAY
 );
 
@@ -227,6 +227,33 @@ INSERT INTO review_record VALUES (0, 17, 1, 'excuse',     'S', 'Permanent medica
 INSERT INTO review_record VALUES (0, 11, 1, 'disqualify', 'P', 'Failed eligibility check — prior disqualification on record','04/03/2026');
 INSERT INTO review_record VALUES (0, 14, 2, 'excuse',     'P', 'Work conflict — requesting temporary deferral',              '04/05/2026');
 INSERT INTO review_record VALUES (0, 20, 2, 'disqualify', 'S', 'Address verification failed — outside service area',         '04/06/2026');
+
+-- --------------------------------------------------------------------------
+-- Participant documents (scanned questionnaire images / supporting files)
+-- file_path: directory prefix within WebDAV root, trailing slash included
+-- file_name: file within that directory
+-- webdav_path = file_path || file_name  (see documents.rs)
+-- --------------------------------------------------------------------------
+
+CREATE TABLE part_image (
+    pi_id       SERIAL       PRIMARY KEY,
+    part_no     INTEGER      NOT NULL,
+    file_path   VARCHAR(255) NOT NULL,
+    file_name   VARCHAR(255) NOT NULL
+);
+
+-- Petrov (part_no=7) — excuse pending: scheduling conflict
+INSERT INTO part_image VALUES (0,  7, '2026/TH/', 'part007_request_form.tif');
+INSERT INTO part_image VALUES (0,  7, '2026/TH/', 'part007_supporting_letter.tif');
+-- Walsh (part_no=17) — excuse sent to CEO: permanent medical
+INSERT INTO part_image VALUES (0, 17, '2026/TH/', 'part017_medical_documentation.tif');
+-- Park (part_no=11) — disqualify pending: prior eligibility issue
+INSERT INTO part_image VALUES (0, 11, '2026/TH/', 'part011_eligibility_record.tif');
+-- Abadi (part_no=14) — excuse pending: work conflict
+INSERT INTO part_image VALUES (0, 14, '2026/SP/', 'part014_employer_letter.tif');
+-- Robinson (part_no=20) — disqualify sent to CEO: address verification
+INSERT INTO part_image VALUES (0, 20, '2026/SP/', 'part020_address_verification.tif');
+INSERT INTO part_image VALUES (0, 20, '2026/SP/', 'part020_service_area_map.tif');
 
 -- --------------------------------------------------------------------------
 -- Staff codes (lookup for pool session staff by type)

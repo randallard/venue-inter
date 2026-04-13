@@ -13,7 +13,7 @@ export async function load({ url }: { url: URL }): Promise<{ user: UserSession |
 	}
 	// CEO users land directly on the review queue, not the admin dashboard
 	if (user?.groups.includes('ceo-review') && url.pathname === '/') {
-		redirect(302, '/reviews/ceo');
+		redirect(302, '/reviews/queue');
 	}
 	return { user };
 }

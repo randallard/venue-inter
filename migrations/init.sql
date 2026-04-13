@@ -74,6 +74,10 @@ CREATE TABLE IF NOT EXISTS app_config (
 
 INSERT INTO app_config (key, value) VALUES ('ceo_review_state', 'live')
     ON CONFLICT (key) DO NOTHING;
+INSERT INTO app_config (key, value) VALUES ('show_review_notes', 'false')
+    ON CONFLICT (key) DO NOTHING;
+INSERT INTO app_config (key, value) VALUES ('show_send_back', 'false')
+    ON CONFLICT (key) DO NOTHING;
 
 -- Informix sync queue: deferred writes back to the National system.
 -- CEO decisions and admin actions write here immediately (fast PG commit),
@@ -123,6 +127,33 @@ CREATE TABLE IF NOT EXISTS document_cache (
 );
 
 CREATE INDEX IF NOT EXISTS idx_document_cache_part_no ON document_cache(part_no);
+
+-- Dev seed: pre-populate status_reviews to match the Informix seed state so the
+-- admin and CEO queues are populated immediately on a fresh stack without waiting
+-- for the refresh cron. The cron uses ON CONFLICT DO NOTHING so these rows are
+-- never overwritten.
+INSERT INTO status_reviews (part_no, pool_no, part_key, review_type, status, admin_notes, created_at, updated_at)
+VALUES
+    ('7',  '1', '7_1',  'excuse',     'pending_admin',
+     'Participant reports scheduling conflict with family event',
+     now() - interval '9 days', now() - interval '9 days'),
+    ('11', '1', '11_1', 'disqualify', 'pending_admin',
+     'Failed eligibility check — prior disqualification on record',
+     now() - interval '7 days', now() - interval '7 days'),
+    ('14', '2', '14_2', 'excuse',     'pending_admin',
+     'Work conflict — requesting temporary deferral',
+     now() - interval '5 days', now() - interval '5 days')
+ON CONFLICT (part_key) DO NOTHING;
+
+INSERT INTO status_reviews (part_no, pool_no, part_key, review_type, status, admin_notes, sent_to_ceo_at, created_at, updated_at)
+VALUES
+    ('17', '1', '17_1', 'excuse',     'pending_ceo',
+     'Permanent medical exemption — documentation verified',
+     now() - interval '7 days', now() - interval '8 days', now() - interval '7 days'),
+    ('20', '2', '20_2', 'disqualify', 'pending_ceo',
+     'Address verification failed — outside service area',
+     now() - interval '3 days', now() - interval '4 days', now() - interval '3 days')
+ON CONFLICT (part_key) DO NOTHING;
 
 -- Note: the `tower_sessions` table (for persistent session storage) is created
 -- automatically at startup by PostgresStore::migrate(). It does not need to

@@ -76,7 +76,9 @@ pub async fn list_documents_handler(
     ) {
         // scan_code tells the frontend whether a questionnaire was submitted
         // online ("web"), scanned (numeric batch code), or not yet received ("").
-        let pool_sql = format!("SELECT scan_code FROM pool WHERE pool_no = {pool_no}");
+        let pool_sql = format!(
+            "SELECT scan_code FROM pool_member WHERE part_no = {part_no} AND pool_no = {pool_no}"
+        );
         if let Ok(Some(mut stmt)) = conn.execute(&pool_sql, ()) {
             if let Ok(mut buf) = TextRowSet::for_cursor(1, &mut stmt, Some(32)) {
                 if let Ok(mut cursor) = stmt.bind_buffer(&mut buf) {
@@ -223,6 +225,21 @@ async fn fetch_and_cache(
     }
 }
 
+/// Decode TIFF bytes and re-encode as JPEG. Returns None on any failure
+/// so callers can fall back to serving the raw bytes.
+fn convert_to_jpeg(data: &[u8]) -> Option<Vec<u8>> {
+    use image::ImageFormat;
+    use std::io::Cursor;
+    let img = image::ImageReader::new(Cursor::new(data))
+        .with_guessed_format()
+        .ok()?
+        .decode()
+        .ok()?;
+    let mut out = Vec::new();
+    img.write_to(&mut Cursor::new(&mut out), ImageFormat::Jpeg).ok()?;
+    Some(out)
+}
+
 async fn set_failed(pool: &sqlx::PgPool, id: Uuid, error: &str) {
     let _ = sqlx::query(
         "UPDATE document_cache SET fetch_status = 'failed', fetch_error = $1 WHERE id = $2",
@@ -271,11 +288,18 @@ pub async fn serve_document_handler(
                 Some(d) => d,
                 None => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
             };
-            let disposition = format!("inline; filename=\"{}\"", row.file_name);
+            // Convert to JPEG so browsers can render it natively.
+            // Falls back to serving raw bytes on decode/encode failure.
+            let (content_type, body_bytes) = match convert_to_jpeg(&data) {
+                Some(jpeg) => ("image/jpeg", jpeg),
+                None => ("image/tiff", data),
+            };
+            let stem = row.file_name.trim_end_matches(".tif").trim_end_matches(".tiff");
+            let disposition = format!("inline; filename=\"{stem}.jpg\"");
             Response::builder()
-                .header(header::CONTENT_TYPE, "image/tiff")
+                .header(header::CONTENT_TYPE, content_type)
                 .header(header::CONTENT_DISPOSITION, disposition)
-                .body(axum::body::Body::from(data))
+                .body(axum::body::Body::from(body_bytes))
                 .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
         }
         "pending" => StatusCode::ACCEPTED.into_response(),

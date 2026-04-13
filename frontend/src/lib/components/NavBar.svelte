@@ -22,7 +22,7 @@
 	</a>
 	{#if isCeo}
 		<div class="nav-links">
-			<a class="nav-link" class:active={isActive('/reviews/ceo')} href="/reviews/ceo">Review Queue</a>
+			<a class="nav-link" class:active={isActive('/reviews/queue')} href="/reviews/queue">Review Queue</a>
 		</div>
 	{:else}
 		<div class="nav-links">
@@ -31,12 +31,15 @@
 			<a class="nav-link" class:active={isActive('/reviews')} href="/reviews">Reviews</a>
 			<a class="nav-link" class:active={isActive('/reports')} href="/reports">Reports</a>
 			<a class="nav-link" class:active={isActive('/data')} href="/data">Data</a>
+			<a class="nav-link" class:active={isActive('/tasks')} href="/tasks">Tasks</a>
 		</div>
 	{/if}
 	<div class="nav-right">
 		{#if user}
 			<span>{display}</span>
-			<a href="/auth/logout">Logout</a>
+			<form method="POST" action="/auth/logout" style="display:contents">
+				<button type="submit">Logout</button>
+			</form>
 		{:else}
 			<a href="/auth/login">Login</a>
 		{/if}

@@ -263,6 +263,8 @@ fn main() {
             .route("/api/tickets/all", get(server::api::all_tickets_handler))
             // ── Phase 5: Reviews ───────────────────────────────
             // Static routes first to avoid shadowing by :part_key
+            .route("/api/reviews/queue", get(server::reviews::unified_queue_handler))
+            .route("/api/reviews/sync-now", post(server::reviews::sync_now_handler))
             .route("/api/reviews/excuse/admin", get(server::reviews::admin_excuse_queue_handler))
             .route("/api/reviews/disqualify/admin", get(server::reviews::admin_disqualify_queue_handler))
             .route("/api/reviews/pending", get(server::reviews::pending_counts_handler))
@@ -278,7 +280,8 @@ fn main() {
             // Documents — must be before the bare /{part_key} catch-all
             .route("/api/reviews/{part_key}/documents", get(server::documents::list_documents_handler))
             .route("/api/documents/{id}", get(server::documents::serve_document_handler))
-            // Parameterized last
+            // Parameterized last — recall before bare detail to avoid ambiguity
+            .route("/api/reviews/{part_key}/recall", post(server::reviews::recall_handler))
             .route("/api/reviews/{part_key}", get(server::reviews::review_detail_handler))
             .layer(cache_no_store)
             .with_state(state.clone())

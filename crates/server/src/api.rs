@@ -587,8 +587,8 @@ pub async fn dashboard_status_handler(
 
     drop(conn);
 
-    let (informix_sync_pending, informix_sync_failed) = if let Some(pg) = &state.pg_pool {
-        let row: (Option<i64>, Option<i64>) = sqlx::query_as(
+    let (informix_sync_pending, informix_sync_failed, failed_tasks) = if let Some(pg) = &state.pg_pool {
+        let sync_row: (Option<i64>, Option<i64>) = sqlx::query_as(
             "SELECT \
                COUNT(*) FILTER (WHERE status = 'pending'), \
                COUNT(*) FILTER (WHERE status = 'failed') \
@@ -597,13 +597,19 @@ pub async fn dashboard_status_handler(
         .fetch_one(pg)
         .await
         .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("PG query failed: {e}")))?;
-        (row.0.unwrap_or(0), row.1.unwrap_or(0))
+        let failed_tasks: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM tasks WHERE status = 'failed'"
+        )
+        .fetch_one(pg)
+        .await
+        .unwrap_or(0);
+        (sync_row.0.unwrap_or(0), sync_row.1.unwrap_or(0), failed_tasks)
     } else {
-        (0, 0)
+        (0, 0, 0)
     };
 
-    info!(bad_show_codes, blank_questionnaires, portal_lockouts, informix_sync_pending, informix_sync_failed, "Dashboard status");
-    Ok(Json(DashboardStatus { bad_show_codes, blank_questionnaires, portal_lockouts, informix_sync_pending, informix_sync_failed }))
+    info!(bad_show_codes, blank_questionnaires, portal_lockouts, informix_sync_pending, informix_sync_failed, failed_tasks, "Dashboard status");
+    Ok(Json(DashboardStatus { bad_show_codes, blank_questionnaires, portal_lockouts, informix_sync_pending, informix_sync_failed, failed_tasks }))
 }
 
 /// GET /api/dashboard/show-types — valid codes for the fix-show-code form
@@ -703,6 +709,7 @@ pub async fn fix_show_code_handler(
         params.new_code.replace('\'', "''"), params.pool_no
     ), ())
     .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("Update failed: {e}")))?;
+    conn.execute("COMMIT WORK", ()).ok();
 
     info!(pool_no = params.pool_no, new_code = %params.new_code, actor = %user.sub, "Fixed show code");
     Ok(Json(ActionResponse { ok: true, message: format!("Pool {} updated to {}", params.pool_no, params.new_code) }))
@@ -755,18 +762,55 @@ pub async fn reset_qq_handler(
     Extension(user): Extension<UserSession>,
     axum::extract::Json(params): axum::extract::Json<ResetQQParams>,
 ) -> ApiResult<ActionResponse> {
-    let conn = state.env
-        .connect(&state.config.dsn, &state.config.user, &state.config.password, ConnectionOptions::default())
-        .map_err(|e| api_err(StatusCode::SERVICE_UNAVAILABLE, format!("DB connection failed: {e}")))?;
+    let pg = state.pg_pool.as_ref().ok_or_else(|| {
+        api_err(StatusCode::SERVICE_UNAVAILABLE, "Database unavailable")
+    })?;
 
-    conn.execute(&format!(
-        "UPDATE pool_member SET responded = 'N', scan_code = NULL WHERE pm_id = {}",
-        params.pm_id
-    ), ())
-    .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("Update failed: {e}")))?;
+    let task_id = crate::tasks::create_task(
+        pg,
+        &user.sub,
+        user.email.as_deref(),
+        &format!("Reset questionnaire for pool member {}", params.pm_id),
+        "reset_questionnaire",
+        &serde_json::json!({ "pm_id": params.pm_id }),
+    )
+    .await
+    .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to create task: {e}")))?;
 
-    info!(pm_id = params.pm_id, actor = %user.sub, "Reset questionnaire");
-    Ok(Json(ActionResponse { ok: true, message: format!("Questionnaire reset for member {}", params.pm_id) }))
+    let result = {
+        let conn = state.env
+            .connect(&state.config.dsn, &state.config.user, &state.config.password, ConnectionOptions::default())
+            .map_err(|e| api_err(StatusCode::SERVICE_UNAVAILABLE, format!("DB connection failed: {e}")))?;
+        let r = conn.execute(&format!(
+            "UPDATE pool_member SET responded = 'N', scan_code = NULL WHERE pm_id = {}",
+            params.pm_id
+        ), ()).map(|_| ()).map_err(|e| e.to_string());
+        if r.is_ok() { conn.execute("COMMIT WORK", ()).ok(); }
+        r
+        // conn dropped here, before any await
+    };
+
+    match result {
+        Ok(()) => {
+            let _ = crate::tasks::update_task_status(
+                pg, task_id, "completed",
+                Some(&format!("Questionnaire reset for PM {}", params.pm_id)),
+                None,
+            ).await;
+            info!(pm_id = params.pm_id, actor = %user.sub, task_id = %task_id, "Reset questionnaire");
+            Ok(Json(ActionResponse { ok: true, message: format!("Questionnaire reset for member {}", params.pm_id) }))
+        }
+        Err(e) => {
+            let error_msg = format!("Informix update failed: {e}");
+            crate::task_runner::handle_task_failure(
+                &state, pg, task_id,
+                &user.sub, user.email.as_deref(),
+                &format!("Reset questionnaire for PM {}", params.pm_id),
+                &error_msg,
+            ).await;
+            Err(api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("Reset failed: {e}")))
+        }
+    }
 }
 
 /// GET /api/pools/lockouts
@@ -821,6 +865,7 @@ pub async fn unlock_participant_handler(
         "UPDATE participant SET active = 'A' WHERE part_no = {}", params.part_no
     ), ())
     .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("Update failed: {e}")))?;
+    conn.execute("COMMIT WORK", ()).ok();
 
     info!(part_no = params.part_no, actor = %user.sub, "Unlocked portal account");
     Ok(Json(ActionResponse { ok: true, message: format!("Participant {} portal access restored", params.part_no) }))

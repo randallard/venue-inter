@@ -95,6 +95,34 @@ export interface DashboardStatus {
 	portal_lockouts: number;
 	informix_sync_pending: number;
 	informix_sync_failed: number;
+	failed_tasks: number;
+}
+
+export interface TaskRow {
+	id: string;
+	description: string;
+	task_type: string;
+	status: string;
+	result_summary: string | null;
+	error_detail: string | null;
+	created_at: string;
+	updated_at: string;
+}
+
+export interface TasksResponse {
+	tasks: TaskRow[];
+	count: number;
+}
+
+export interface TicketRow {
+	id: string;
+	task_id: string | null;
+	status: string;
+	description: string;
+	admin_notes: string | null;
+	user_email: string | null;
+	created_at: string;
+	updated_at: string;
 }
 
 export interface BadShowCodeRow {
@@ -279,10 +307,50 @@ export interface SyncStatusResponse {
 	unprocessed_count: number;
 }
 
+export interface DocumentMeta {
+	id: string;
+	file_name: string;
+	fetch_status: 'pending' | 'cached' | 'failed';
+	fetched_at: string | null;
+}
+
+export interface DocumentsResponse {
+	/** From pool_member.scan_code. null = not received, "web" = portal, other = scan batch code */
+	scan_code: string | null;
+	documents: DocumentMeta[];
+}
+
 export interface SyncOneResponse {
 	processed: number;
 	succeeded: number;
 	failed: number;
 	errors: string[];
+}
+
+// ── Unified Review Queue ─────────────────────────────────────
+
+export interface UnifiedReviewRow {
+	id: string;
+	part_no: string;
+	pool_no: string;
+	part_key: string;
+	fname: string | null;
+	lname: string | null;
+	review_type: string;
+	/** pending_admin | pending_ceo | completed | sent_back */
+	status: string;
+	admin_notes: string | null;
+	ceo_notes: string | null;
+	decision: string | null;
+	sent_to_ceo_at: string | null;
+	created_at: string;
+}
+
+export interface UnifiedReviewQueue {
+	rows: UnifiedReviewRow[];
+	count: number;
+	maintenance: boolean;
+	show_notes: boolean;
+	show_send_back: boolean;
 }
 

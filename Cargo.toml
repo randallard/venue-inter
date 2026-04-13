@@ -3,7 +3,7 @@ members = ["crates/shared-types", "crates/server", "crates/app"]
 resolver = "2"
 
 [workspace.dependencies]
-dioxus = { version = "0.7", features = ["router", "fullstack"] }
+dioxus = { version = "=0.7.5", features = ["router", "fullstack"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
@@ -26,3 +26,4 @@ uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 lettre = { version = "0.11", default-features = false, features = ["tokio1-rustls-tls", "smtp-transport", "builder"] }
 serde_yaml = "0.9"
+image = { version = "0.25", default-features = false, features = ["tiff", "jpeg"] }

@@ -70,6 +70,12 @@
 				<div class="card-count">{status.informix_sync_failed}</div>
 				<div class="card-sub">{status.informix_sync_failed === 0 ? 'No failures' : 'records need attention'}</div>
 			</div>
+
+			<a class="status-card {status.failed_tasks === 0 ? 'ok' : 'crit'}" href="/tasks">
+				<div class="card-label">Failed Tasks</div>
+				<div class="card-count">{status.failed_tasks}</div>
+				<div class="card-sub">{status.failed_tasks === 0 ? 'All clear' : 'tasks need review'}</div>
+			</a>
 		</div>
 	{/if}
 

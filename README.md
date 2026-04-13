@@ -82,8 +82,24 @@ migration/       # Phase-by-phase build plan (Markdown specs)
 | `tickets` | Failure tickets — auto-created when sync queue items exhaust retries |
 | `status_reviews` | CEO review queue; `part_key` (unique) links to Informix `part_no_pool_no` |
 | `review_history` | Full audit trail of every review action (sent_to_ceo, decided, sent_back) |
-| `app_config` | Feature flags — `ceo_review_state` = `live` \| `maintenance` |
+| `app_config` | Runtime feature flags — see table below |
 | `informix_sync_queue` | Deferred writes back to Informix; operations: `update_pool_member_status`, `close_review_record`, `reopen_review_record` |
+
+### `app_config` keys
+
+| Key | Values | Default | Effect |
+|---|---|---|---|
+| `ceo_review_state` | `live` \| `maintenance` | `live` | When `maintenance`: CEO queue returns empty and shows a banner — use to pause decisions during national system downtime |
+| `show_review_notes` | `true` \| `false` | `false` | When `false`: hides all notes fields (admin prep textarea, CEO decision textarea, displayed admin/CEO notes) from the review queue UI |
+| `show_send_back` | `true` \| `false` | `false` | When `false`: hides the admin **Recall to Admin** button and the CEO **Send Back** decision button |
+
+Changes take effect immediately — the queue page reads config on every load. Update via SQL:
+
+```sql
+UPDATE app_config SET value = 'maintenance' WHERE key = 'ceo_review_state';
+UPDATE app_config SET value = 'true'        WHERE key = 'show_review_notes';
+UPDATE app_config SET value = 'true'        WHERE key = 'show_send_back';
+```
 | `tower_sessions` | Persistent session store (auto-created at startup by sqlx) |
 
 ## Docker Compose Services

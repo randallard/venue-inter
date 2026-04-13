@@ -23,7 +23,11 @@ import type {
 	PendingCountsResponse,
 	CeoReviewStateResponse,
 	SyncStatusResponse,
-	SyncOneResponse
+	SyncOneResponse,
+	DocumentsResponse,
+	TasksResponse,
+	TicketRow,
+	UnifiedReviewQueue
 } from './types';
 
 class ApiError extends Error {
@@ -220,6 +224,42 @@ export async function syncOneRecord(part_key: string): Promise<SyncOneResponse> 
 
 export async function lookupSyncRecord(query: string): Promise<SyncStatusResponse> {
 	return apiFetch(`/api/reviews/sync-status/lookup/${encodeURIComponent(query)}`);
+}
+
+export async function getUnifiedQueue(opts: {
+	type?: string;
+	status?: string;
+} = {}): Promise<UnifiedReviewQueue> {
+	const params = new URLSearchParams();
+	if (opts.type) params.set('type', opts.type);
+	if (opts.status) params.set('status', opts.status);
+	const qs = params.toString();
+	return apiFetch(`/api/reviews/queue${qs ? '?' + qs : ''}`);
+}
+
+export async function recallRecord(part_key: string): Promise<ActionResponse> {
+	return apiFetch(`/api/reviews/${part_key}/recall`, { method: 'POST' });
+}
+
+export async function syncNow(): Promise<{ inserted: number }> {
+	return apiFetch('/api/reviews/sync-now', { method: 'POST' });
+}
+
+// ── Documents ────────────────────────────────────────────────
+
+export async function listDocuments(part_key: string): Promise<DocumentsResponse> {
+	return apiFetch(`/api/reviews/${part_key}/documents`);
+}
+
+// ── Tasks & Tickets ──────────────────────────────────────────
+
+export async function getTasks(): Promise<TasksResponse> {
+	return apiFetch('/api/tasks');
+}
+
+export async function getTickets(): Promise<TicketRow[]> {
+	const res: { tickets: TicketRow[]; count: number } = await apiFetch('/api/tickets');
+	return res.tickets;
 }
 
 export { ApiError };

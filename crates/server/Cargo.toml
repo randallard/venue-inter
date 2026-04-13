@@ -29,3 +29,5 @@ lettre = { workspace = true }
 tower-sessions-sqlx-store = { workspace = true }
 tower_governor = { workspace = true }
 serde_yaml = { workspace = true }
+urlencoding = "2"
+image = { workspace = true }

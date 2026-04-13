@@ -318,8 +318,11 @@ pub async fn logout_handler(session: Session, headers: HeaderMap) -> Response {
 
     let redirect_url = match std::env::var("OIDC_ISSUER_URL") {
         Ok(issuer) => {
+            let post_logout = std::env::var("POST_LOGOUT_REDIRECT_URI")
+                .unwrap_or_else(|_| "http://localhost:5173/".to_string());
+            let encoded = urlencoding::encode(&post_logout);
             let base = issuer.trim_end_matches('/');
-            format!("{base}/end-session/?redirect_uri=http%3A%2F%2Flocalhost%3A8080%2F")
+            format!("{base}/end-session/?redirect_uri={encoded}")
         }
         Err(_) => "/".to_string(),
     };

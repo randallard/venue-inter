@@ -15,7 +15,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN rustup target add wasm32-unknown-unknown
 
 # -- Install Dioxus CLI -------------------------------------------------------
-RUN cargo install dioxus-cli
+RUN cargo install dioxus-cli --version "=0.7.5"
 
 # -- Informix user/group (some CSDK libs expect this) -------------------------
 RUN groupadd informix \
@@ -120,4 +120,4 @@ WORKDIR /srv/app
 
 EXPOSE 8080
 
-ENTRYPOINT ["./app"]
+ENTRYPOINT ["./server"]

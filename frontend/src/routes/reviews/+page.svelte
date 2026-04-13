@@ -32,7 +32,7 @@
 	</div>
 
 	<div class="queue-grid">
-		<a class="queue-card" href="/reviews/excuse">
+		<a class="queue-card" href="/reviews/queue?type=excuse&status=pending_admin">
 			<div class="queue-label">Excuse Requests</div>
 			{#if counts !== null}
 				<div class="queue-count {counts.excuse_pending > 0 ? 'has-items' : ''}">
@@ -45,7 +45,7 @@
 			{/if}
 		</a>
 
-		<a class="queue-card" href="/reviews/disqualify">
+		<a class="queue-card" href="/reviews/queue?type=disqualify&status=pending_admin">
 			<div class="queue-label">Disqualification Requests</div>
 			{#if counts !== null}
 				<div class="queue-count {counts.disqualify_pending > 0 ? 'has-items' : ''}">
@@ -58,7 +58,7 @@
 			{/if}
 		</a>
 
-		<a class="queue-card queue-card-ceo" href="/reviews/ceo">
+		<a class="queue-card queue-card-ceo" href="/reviews/queue?status=pending_ceo">
 			<div class="queue-label">CEO Queue</div>
 			{#if counts !== null}
 				<div class="queue-count {counts.ceo_queue > 0 ? 'has-items' : ''}">

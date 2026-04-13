@@ -207,6 +207,7 @@ pub struct DashboardStatus {
     pub portal_lockouts: i64,
     pub informix_sync_pending: i64,
     pub informix_sync_failed: i64,
+    pub failed_tasks: i64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -422,6 +423,34 @@ pub struct CeoReviewStateResponse {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SetCeoStateParams {
     pub state: String,
+}
+
+/// A row in the unified review queue (PostgreSQL status_reviews + Informix names).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct UnifiedReviewRow {
+    pub id: String,
+    pub part_no: String,
+    pub pool_no: String,
+    pub part_key: String,
+    pub fname: Option<String>,
+    pub lname: Option<String>,
+    pub review_type: String,
+    /// pending_admin | pending_ceo | completed | sent_back
+    pub status: String,
+    pub admin_notes: Option<String>,
+    pub ceo_notes: Option<String>,
+    pub decision: Option<String>,
+    pub sent_to_ceo_at: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct UnifiedReviewQueue {
+    pub rows: Vec<UnifiedReviewRow>,
+    pub count: usize,
+    pub maintenance: bool,
+    pub show_notes: bool,
+    pub show_send_back: bool,
 }
 
 // ── Tickets ──────────────────────────────────────────────
