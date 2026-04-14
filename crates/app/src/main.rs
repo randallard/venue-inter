@@ -273,13 +273,15 @@ fn main() {
             .route("/api/reviews/ceo-state", get(server::reviews::get_ceo_state_handler))
             .route("/api/reviews/ceo-state", post(server::reviews::set_ceo_state_handler))
             .route("/api/reviews/send-to-ceo", post(server::reviews::send_to_ceo_handler))
+            .route("/api/reviews/report", get(server::reviews::review_report_handler))
             .route("/api/reviews/records/{part_no}", get(server::reviews::review_history_handler))
+            .route("/api/reviews/participant/{part_no}", get(server::reviews::participant_check_handler))
             .route("/api/reviews/sync-status", get(server::reviews::sync_status_handler))
             .route("/api/reviews/sync-status/sync/{part_key}", post(server::reviews::sync_one_handler))
             .route("/api/reviews/sync-status/lookup/{query}", get(server::reviews::lookup_handler))
             // Documents — must be before the bare /{part_key} catch-all
             .route("/api/reviews/{part_key}/documents", get(server::documents::list_documents_handler))
-            .route("/api/documents/{id}", get(server::documents::serve_document_handler))
+            .route("/api/documents/view", get(server::documents::proxy_document_handler))
             // Parameterized last — recall before bare detail to avoid ambiguity
             .route("/api/reviews/{part_key}/recall", post(server::reviews::recall_handler))
             .route("/api/reviews/{part_key}", get(server::reviews::review_detail_handler))

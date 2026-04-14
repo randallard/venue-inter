@@ -48,22 +48,9 @@
 	let syncing = $state(false);
 	let syncMsg = $state<string | null>(null);
 
-	// Incremented on every load() call. Stale doc polls check this and abort.
+	// Incremented on every load() call so in-flight detail/doc fetches from a
+	// previous filter selection don't clobber the current results.
 	let loadGen = 0;
-
-	async function pollDocs(gen: number, i: number, part_key: string, attempt = 0) {
-		if (attempt >= 10 || loadGen !== gen) return;
-		await new Promise<void>((r) => setTimeout(r, 2000));
-		if (loadGen !== gen) return;
-		try {
-			const docs = await listDocuments(part_key);
-			if (loadGen !== gen) return;
-			cases[i] = { ...cases[i], docs };
-			if (docs.documents.some((d) => d.fetch_status === 'pending')) {
-				pollDocs(gen, i, part_key, attempt + 1);
-			}
-		} catch { /* ignore */ }
-	}
 
 	async function load() {
 		const gen = ++loadGen;
@@ -103,15 +90,11 @@
 							detailLoading: false
 						};
 					});
-				// Load documents for all active cases, then auto-poll while any are pending
 				if (row.status !== 'completed' && row.status !== 'sent_back') {
 					listDocuments(row.part_key)
 						.then((docs) => {
 							if (loadGen !== gen) return;
 							cases[i] = { ...cases[i], docs, docsLoading: false };
-							if (docs.documents.some((d) => d.fetch_status === 'pending')) {
-								pollDocs(gen, i, row.part_key);
-							}
 						})
 						.catch(() => { if (loadGen !== gen) return; cases[i] = { ...cases[i], docsLoading: false }; });
 				}
@@ -380,17 +363,7 @@
 
 									<!-- Documents -->
 									<div class="info-section">
-										<div class="docs-header">
-											<div class="info-label" style="margin:0">Documents</div>
-											{#if c.docs?.documents.some(d => d.fetch_status === 'pending')}
-												<button class="btn-refresh" onclick={() => {
-													cases[i] = { ...cases[i], docsLoading: true };
-													listDocuments(c.row.part_key)
-														.then(docs => { cases[i] = { ...cases[i], docs, docsLoading: false }; })
-														.catch(() => { cases[i] = { ...cases[i], docsLoading: false }; });
-												}}>Refresh</button>
-											{/if}
-										</div>
+										<div class="info-label">Documents</div>
 										{#if c.docsLoading}
 											<p class="text-muted" style="font-size:0.85rem">Loading…</p>
 										{:else if !c.docs || c.docs.documents.length === 0}
@@ -405,13 +378,7 @@
 												{#each c.docs.documents as doc}
 													<li class="doc-row">
 														<span class="doc-name">{doc.file_name}</span>
-														{#if doc.fetch_status === 'cached'}
-															<button class="btn-view" onclick={() => viewingDoc = doc}>View</button>
-														{:else if doc.fetch_status === 'pending'}
-															<span class="doc-status pending">Fetching…</span>
-														{:else}
-															<span class="doc-status failed">Unavailable</span>
-														{/if}
+														<button class="btn-view" onclick={() => viewingDoc = doc}>View</button>
 													</li>
 												{/each}
 											</ul>
@@ -823,7 +790,7 @@
 				<span class="doc-viewer-name">{viewingDoc.file_name}</span>
 				<button class="doc-close" onclick={() => viewingDoc = null}>✕</button>
 			</div>
-			<img src="/api/documents/{viewingDoc.id}" alt={viewingDoc.file_name} class="doc-img" />
+			<img src="/api/documents/view?path={encodeURIComponent(viewingDoc.webdav_path)}" alt={viewingDoc.file_name} class="doc-img" />
 		</div>
 	</div>
 {/if}

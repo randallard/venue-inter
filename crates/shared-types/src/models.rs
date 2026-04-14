@@ -453,6 +453,98 @@ pub struct UnifiedReviewQueue {
     pub show_send_back: bool,
 }
 
+// ── Review report ─────────────────────────────────────────
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ReviewReportRow {
+    pub id: String,
+    pub part_no: String,
+    pub pool_no: String,
+    pub part_key: String,
+    pub fname: Option<String>,
+    pub lname: Option<String>,
+    pub review_type: String,
+    pub status: String,
+    pub decision: Option<String>,
+    pub decided_at: Option<String>,
+    /// Aggregated sync status: "done" | "pending" | "failed" | "no_ops"
+    pub sync_status: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ReviewReport {
+    pub rows: Vec<ReviewReportRow>,
+    pub count: usize,
+}
+
+// ── Participant check (cross-system snapshot) ─────────────
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PoolMemberSnapshot {
+    pub pool_no: i32,
+    pub show_no: Option<i32>,
+    pub status: i32,
+    pub scan_code: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ReviewRecordSnapshot {
+    pub rr_id: i32,
+    pub pool_no: i32,
+    pub review_type: String,
+    pub ifx_status: String,   // P / S / C
+    pub submitted_date: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StatusReviewSnapshot {
+    pub id: String,
+    pub pool_no: String,
+    pub part_key: String,
+    pub review_type: String,
+    pub pg_status: String,
+    pub decision: Option<String>,
+    pub sent_to_ceo_at: Option<String>,
+    pub decided_at: Option<String>,
+    pub updated_at: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SyncQueueSnapshot {
+    pub id: String,
+    pub operation: String,
+    pub status: String,
+    pub attempts: i32,
+    pub last_error: Option<String>,
+    pub created_at: String,
+    pub completed_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DocumentSnapshot {
+    pub file_name: String,
+    pub webdav_path: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ParticipantCheck {
+    pub part_no: String,
+    pub fname: Option<String>,
+    pub lname: Option<String>,
+    /// Informix pool_member rows
+    pub pool_members: Vec<PoolMemberSnapshot>,
+    /// Informix review_record rows
+    pub review_records: Vec<ReviewRecordSnapshot>,
+    /// PostgreSQL status_reviews rows
+    pub status_reviews: Vec<StatusReviewSnapshot>,
+    /// PostgreSQL informix_sync_queue rows for this participant
+    pub sync_queue: Vec<SyncQueueSnapshot>,
+    /// PostgreSQL document_cache rows
+    pub documents: Vec<DocumentSnapshot>,
+    /// PostgreSQL review_history audit trail
+    pub history: Vec<ReviewHistoryEntry>,
+}
+
 // ── Tickets ──────────────────────────────────────────────
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

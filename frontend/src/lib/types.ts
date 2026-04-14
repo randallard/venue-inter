@@ -308,10 +308,8 @@ export interface SyncStatusResponse {
 }
 
 export interface DocumentMeta {
-	id: string;
 	file_name: string;
-	fetch_status: 'pending' | 'cached' | 'failed';
-	fetched_at: string | null;
+	webdav_path: string;
 }
 
 export interface DocumentsResponse {
@@ -344,6 +342,84 @@ export interface UnifiedReviewRow {
 	decision: string | null;
 	sent_to_ceo_at: string | null;
 	created_at: string;
+}
+
+// ── Review report ─────────────────────────────────────────
+
+export interface ReviewReportRow {
+	id: string;
+	part_no: string;
+	pool_no: string;
+	part_key: string;
+	fname: string | null;
+	lname: string | null;
+	review_type: string;
+	status: string;
+	decision: string | null;
+	decided_at: string | null;
+	/** "done" | "pending" | "failed" | "no_ops" */
+	sync_status: string;
+}
+
+export interface ReviewReport {
+	rows: ReviewReportRow[];
+	count: number;
+}
+
+// ── Participant check ─────────────────────────────────────
+
+export interface PoolMemberSnapshot {
+	pool_no: number;
+	show_no: number | null;
+	status: number;
+	scan_code: string | null;
+}
+
+export interface ReviewRecordSnapshot {
+	rr_id: number;
+	pool_no: number;
+	review_type: string;
+	ifx_status: string;   // P / S / C
+	submitted_date: string | null;
+}
+
+export interface StatusReviewSnapshot {
+	id: string;
+	pool_no: string;
+	part_key: string;
+	review_type: string;
+	pg_status: string;
+	decision: string | null;
+	sent_to_ceo_at: string | null;
+	decided_at: string | null;
+	updated_at: string;
+}
+
+export interface SyncQueueSnapshot {
+	id: string;
+	operation: string;
+	status: string;
+	attempts: number;
+	last_error: string | null;
+	created_at: string;
+	completed_at: string | null;
+}
+
+export interface DocumentSnapshot {
+	file_name: string;
+	webdav_path: string;
+}
+
+export interface ParticipantCheck {
+	part_no: string;
+	fname: string | null;
+	lname: string | null;
+	pool_members: PoolMemberSnapshot[];
+	review_records: ReviewRecordSnapshot[];
+	status_reviews: StatusReviewSnapshot[];
+	sync_queue: SyncQueueSnapshot[];
+	documents: DocumentSnapshot[];
+	history: ReviewHistoryEntry[];
 }
 
 export interface UnifiedReviewQueue {

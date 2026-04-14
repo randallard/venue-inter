@@ -57,6 +57,17 @@ Dashboard reflects the live queue state: pending count (yellow), failed count (r
 **Idempotency:** Each row has a unique UUID. The task processes each row once.
 Re-running the cron cannot double-apply a completed row.
 
+**Document cache cleanup:** When all sync ops for a participant complete successfully
+(i.e. all `informix_sync_queue` rows for that `part_no`/`pool_no` reach `status = 'completed'`),
+delete the corresponding `document_cache` rows:
+
+```sql
+DELETE FROM document_cache WHERE part_no = :part_no;
+```
+
+This frees binary storage after the case is closed. Subsequent document views (e.g. from the
+participant check page) fall back to the live WebDAV proxy without re-caching.
+
 **Verify:** After a CEO decision creates two sync queue rows, running the task
 updates Informix and marks both rows completed. Dashboard returns to green.
 Running again is a no-op.

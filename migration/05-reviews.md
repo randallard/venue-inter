@@ -266,9 +266,9 @@ Admin can toggle CEO review to maintenance mode:
 - [x] 5.11 Review history API (`review_history_handler`)
 - [x] 5.12 CEO state toggle (`get_ceo_state_handler`, `set_ceo_state_handler`)
 - [x] Pending counts API (`pending_counts_handler`)
-- [x] Document caching (`crates/server/src/documents.rs`):
-  - `GET /api/reviews/:part_key/documents` — queries Informix `part_image` + `pool.scan_code`, upserts `document_cache`, fires background WebDAV fetch for pending rows
-  - `GET /api/documents/:id` — serves cached bytes as `image/tiff`; 202 while pending, 503 on failure
+- [x] Document handling (`crates/server/src/documents.rs`):
+  - `GET /api/reviews/:part_key/documents` — queries Informix `part_image` + `pool_member.scan_code`, upserts `document_cache`, fires background WebDAV fetch for pending rows; returns `{file_name, webdav_path}` per file
+  - `GET /api/documents/view?path=<webdav_path>` — serves document for viewing; checks `document_cache` first (populated during active review), falls back to live WebDAV proxy on cache miss; nothing is written on a proxy hit
 - [x] Sync status API (`sync_status_handler`):
   - `GET /api/reviews/sync-status` — cross-system view merging Informix `review_record`, PG `status_reviews`, and `informix_sync_queue`; computes per-record health (`ok`, `active`, `syncing`, `warning`, `error`, `unprocessed`); sorted by severity
 
@@ -290,9 +290,12 @@ Admin can toggle CEO review to maintenance mode:
 
 ## Notes
 
-- **Document caching**: WebDAV credentials are optional. Set `WEBDAV_BASE_URL`, `WEBDAV_USER`,
-  `WEBDAV_PASSWORD` in `.env`. See `docs/dev-setup.md` §9 for local filesystem testing instructions.
-  The `document_cache` table is in `migrations/init.sql`.
+- **Document lifecycle**: WebDAV credentials are optional (`WEBDAV_BASE_URL`, `WEBDAV_USER`,
+  `WEBDAV_PASSWORD` in `.env`). `document_cache` rows are created when an active case is loaded
+  and deleted by the Phase 7 sync cron once the Informix sync ops for that participant complete.
+  After the cache is cleared, views fall back to live WebDAV proxy with no re-caching. The
+  `document_cache` table is in `migrations/init.sql`. See `docs/dev-setup.md` §9 for local
+  filesystem testing instructions.
 
 - **Sync status**: The `/reviews/sync` page shows real-time queue health but does **not** process
   the queue — that is Phase 7 (`sync_informix_queue` cron). The page is an admin diagnostic tool.

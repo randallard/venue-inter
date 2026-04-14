@@ -27,7 +27,9 @@ import type {
 	DocumentsResponse,
 	TasksResponse,
 	TicketRow,
-	UnifiedReviewQueue
+	UnifiedReviewQueue,
+	ParticipantCheck,
+	ReviewReport
 } from './types';
 
 class ApiError extends Error {
@@ -196,6 +198,14 @@ export async function ceoDecide(params: {
 
 export async function getReviewHistory(part_no: number | string): Promise<ReviewHistoryResponse> {
 	return apiFetch(`/api/reviews/records/${part_no}`);
+}
+
+export async function getParticipantCheck(part_no: number | string): Promise<ParticipantCheck> {
+	return apiFetch(`/api/reviews/participant/${part_no}`);
+}
+
+export async function getReviewReport(): Promise<ReviewReport> {
+	return apiFetch('/api/reviews/report');
 }
 
 export async function getPendingCounts(): Promise<PendingCountsResponse> {

@@ -80,6 +80,13 @@
 				<span class="tool-desc">Cross-system health: Informix vs PostgreSQL vs sync queue</span>
 			</span>
 		</a>
+		<a class="tool-link" href="/reviews/report">
+			<span class="tool-icon">↗</span>
+			<span>
+				<strong>Decisions Report</strong>
+				<span class="tool-desc">Recently decided cases with decision and sync status</span>
+			</span>
+		</a>
 	</div>
 
 	<div class="history-section">

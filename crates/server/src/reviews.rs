@@ -13,9 +13,11 @@ use uuid::Uuid;
 use crate::AppState;
 use shared_types::{
     ActionResponse, AdminReviewQueue, AdminReviewRow, CeoDecideParams, CeoReviewQueue,
-    CeoReviewRow, CeoReviewStateResponse, DecideResponse, ErrorResponse, PendingCountsResponse,
-    ReviewDetail, ReviewHistoryEntry, ReviewHistoryResponse, SendToCeoParams, SetCeoStateParams,
-    UnifiedReviewQueue, UnifiedReviewRow, UserSession,
+    CeoReviewRow, CeoReviewStateResponse, DecideResponse, DocumentSnapshot, ErrorResponse,
+    ParticipantCheck, PendingCountsResponse, PoolMemberSnapshot, ReviewDetail, ReviewHistoryEntry,
+    ReviewHistoryResponse, ReviewRecordSnapshot, ReviewReport, ReviewReportRow, SendToCeoParams,
+    SetCeoStateParams, StatusReviewSnapshot, SyncQueueSnapshot, UnifiedReviewQueue, UnifiedReviewRow,
+    UserSession,
 };
 
 type ApiResult<T> = Result<Json<T>, (StatusCode, Json<ErrorResponse>)>;
@@ -1745,6 +1747,382 @@ pub async fn recall_handler(
 }
 
 // ── Sync now ──────────────────────────────────────────────────
+
+// ── Review report ────────────────────────────────────────────
+
+/// GET /api/reviews/report
+/// All completed/sent_back reviews in the last 90 days, with aggregated sync status.
+pub async fn review_report_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(_user): Extension<UserSession>,
+) -> ApiResult<ReviewReport> {
+    let pg = state
+        .pg_pool
+        .as_ref()
+        .ok_or_else(|| api_err(StatusCode::SERVICE_UNAVAILABLE, "PostgreSQL not configured"))?;
+
+    #[derive(sqlx::FromRow)]
+    struct ReportRow {
+        id: Uuid,
+        part_no: String,
+        pool_no: String,
+        part_key: String,
+        review_type: String,
+        status: String,
+        decision: Option<String>,
+        decided_at: Option<chrono::DateTime<chrono::Utc>>,
+        sync_status: String,
+    }
+
+    let pg_rows = sqlx::query_as::<_, ReportRow>(
+        "SELECT \
+            sr.id, sr.part_no, sr.pool_no, sr.part_key, sr.review_type, \
+            sr.status, sr.decision, sr.decided_at, \
+            CASE \
+                WHEN COUNT(sq.id) = 0 THEN 'no_ops' \
+                WHEN COUNT(sq.id) FILTER (WHERE sq.status = 'failed')  > 0 THEN 'failed' \
+                WHEN COUNT(sq.id) FILTER (WHERE sq.status = 'pending') > 0 THEN 'pending' \
+                ELSE 'done' \
+            END AS sync_status \
+         FROM status_reviews sr \
+         LEFT JOIN informix_sync_queue sq \
+             ON sq.payload->>'part_no' = sr.part_no \
+            AND sq.payload->>'pool_no' = sr.pool_no \
+         WHERE sr.status IN ('completed', 'sent_back') \
+           AND sr.decided_at >= now() - interval '90 days' \
+         GROUP BY sr.id, sr.part_no, sr.pool_no, sr.part_key, sr.review_type, \
+                  sr.status, sr.decision, sr.decided_at \
+         ORDER BY sr.decided_at DESC NULLS LAST",
+    )
+    .fetch_all(pg)
+    .await
+    .map_err(|e| api_err(StatusCode::INTERNAL_SERVER_ERROR, format!("Query failed: {e}")))?;
+
+    // Batch Informix name lookup
+    let part_nos: Vec<i32> = pg_rows
+        .iter()
+        .filter_map(|r| r.part_no.parse::<i32>().ok())
+        .collect::<std::collections::HashSet<i32>>()
+        .into_iter()
+        .collect();
+
+    let name_map: std::collections::HashMap<i32, (Option<String>, Option<String>)> =
+        if part_nos.is_empty() {
+            std::collections::HashMap::new()
+        } else {
+            let in_clause = part_nos
+                .iter()
+                .map(|n| n.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!(
+                "SELECT part_no, fname, lname FROM participant WHERE part_no IN ({in_clause})"
+            );
+            let mut map = std::collections::HashMap::new();
+            if let Ok(conn) = state.env.connect(
+                &state.config.dsn,
+                &state.config.user,
+                &state.config.password,
+                ConnectionOptions::default(),
+            ) {
+                if let Ok(Some(mut stmt)) = conn.execute(&sql, ()) {
+                    if let Ok(mut buf) = TextRowSet::for_cursor(500, &mut stmt, Some(256)) {
+                        if let Ok(mut cursor) = stmt.bind_buffer(&mut buf) {
+                            while let Ok(Some(batch)) = cursor.fetch() {
+                                for row in 0..batch.num_rows() {
+                                    if let Some(pno) = col_str(&batch, 0, row)
+                                        .and_then(|s| s.parse::<i32>().ok())
+                                    {
+                                        map.insert(
+                                            pno,
+                                            (col_str(&batch, 1, row), col_str(&batch, 2, row)),
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            map
+        };
+
+    let rows: Vec<ReviewReportRow> = pg_rows
+        .into_iter()
+        .map(|r| {
+            let pno: i32 = r.part_no.parse().unwrap_or(0);
+            let (fname, lname) = name_map.get(&pno).cloned().unwrap_or((None, None));
+            ReviewReportRow {
+                id: r.id.to_string(),
+                part_no: r.part_no,
+                pool_no: r.pool_no,
+                part_key: r.part_key,
+                fname,
+                lname,
+                review_type: r.review_type,
+                status: r.status,
+                decision: r.decision,
+                decided_at: r.decided_at.map(|t| t.to_rfc3339()),
+                sync_status: r.sync_status,
+            }
+        })
+        .collect();
+
+    let count = rows.len();
+    Ok(Json(ReviewReport { rows, count }))
+}
+
+// ── Participant check ─────────────────────────────────────────
+
+/// GET /api/reviews/participant/:part_no
+/// Cross-system snapshot: Informix pool_member + review_record,
+/// PG status_reviews + sync queue + document_cache + review_history audit trail.
+pub async fn participant_check_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(_user): Extension<UserSession>,
+    AxumPath(part_no): AxumPath<String>,
+) -> ApiResult<ParticipantCheck> {
+    let pg = state
+        .pg_pool
+        .as_ref()
+        .ok_or_else(|| api_err(StatusCode::SERVICE_UNAVAILABLE, "PostgreSQL not configured"))?;
+
+    let part_no_int: i32 = part_no
+        .parse()
+        .map_err(|_| api_err(StatusCode::BAD_REQUEST, "Invalid participant number"))?;
+
+    // ── Informix ─────────────────────────────────────────────
+    let (fname, lname, pool_members, review_records, documents) = {
+        let mut fname: Option<String> = None;
+        let mut lname: Option<String> = None;
+        let mut pool_members: Vec<PoolMemberSnapshot> = Vec::new();
+        let mut review_records: Vec<ReviewRecordSnapshot> = Vec::new();
+        let mut documents: Vec<DocumentSnapshot> = Vec::new();
+
+        if let Ok(conn) = state.env.connect(
+            &state.config.dsn,
+            &state.config.user,
+            &state.config.password,
+            ConnectionOptions::default(),
+        ) {
+            // Participant name
+            let name_sql = format!(
+                "SELECT fname, lname FROM participant WHERE part_no = {part_no_int}"
+            );
+            if let Ok(Some(mut stmt)) = conn.execute(&name_sql, ()) {
+                if let Ok(mut buf) = TextRowSet::for_cursor(2, &mut stmt, Some(100)) {
+                    if let Ok(mut cursor) = stmt.bind_buffer(&mut buf) {
+                        if let Ok(Some(batch)) = cursor.fetch() {
+                            fname = col_str(&batch, 0, 0);
+                            lname = col_str(&batch, 1, 0);
+                        }
+                    }
+                }
+            }
+
+            // Pool members (joined with pool for show_no)
+            let pm_sql = format!(
+                "SELECT pm.pool_no, po.show_no, pm.status, pm.scan_code \
+                 FROM pool_member pm JOIN pool po ON po.pool_no = pm.pool_no \
+                 WHERE pm.part_no = {part_no_int} ORDER BY pm.pool_no"
+            );
+            if let Ok(Some(mut stmt)) = conn.execute(&pm_sql, ()) {
+                if let Ok(mut buf) = TextRowSet::for_cursor(50, &mut stmt, Some(100)) {
+                    if let Ok(mut cursor) = stmt.bind_buffer(&mut buf) {
+                        while let Ok(Some(batch)) = cursor.fetch() {
+                            for row in 0..batch.num_rows() {
+                                pool_members.push(PoolMemberSnapshot {
+                                    pool_no: col_str(&batch, 0, row)
+                                        .and_then(|s| s.parse().ok())
+                                        .unwrap_or(0),
+                                    show_no: col_str(&batch, 1, row)
+                                        .and_then(|s| s.parse().ok()),
+                                    status: col_str(&batch, 2, row)
+                                        .and_then(|s| s.parse().ok())
+                                        .unwrap_or(0),
+                                    scan_code: col_str(&batch, 3, row),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Review records
+            let rr_sql = format!(
+                "SELECT rr_id, pool_no, review_type, status, submitted_date \
+                 FROM review_record WHERE part_no = {part_no_int} \
+                 ORDER BY submitted_date DESC"
+            );
+            if let Ok(Some(mut stmt)) = conn.execute(&rr_sql, ()) {
+                if let Ok(mut buf) = TextRowSet::for_cursor(50, &mut stmt, Some(100)) {
+                    if let Ok(mut cursor) = stmt.bind_buffer(&mut buf) {
+                        while let Ok(Some(batch)) = cursor.fetch() {
+                            for row in 0..batch.num_rows() {
+                                review_records.push(ReviewRecordSnapshot {
+                                    rr_id: col_str(&batch, 0, row)
+                                        .and_then(|s| s.parse().ok())
+                                        .unwrap_or(0),
+                                    pool_no: col_str(&batch, 1, row)
+                                        .and_then(|s| s.parse().ok())
+                                        .unwrap_or(0),
+                                    review_type: col_str(&batch, 2, row).unwrap_or_default(),
+                                    ifx_status: col_str(&batch, 3, row).unwrap_or_default(),
+                                    submitted_date: col_str(&batch, 4, row),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Documents from Informix part_image
+            let img_sql = format!(
+                "SELECT file_path, file_name FROM part_image WHERE part_no = {part_no_int}"
+            );
+            if let Ok(Some(mut stmt)) = conn.execute(&img_sql, ()) {
+                if let Ok(mut buf) = TextRowSet::for_cursor(50, &mut stmt, Some(512)) {
+                    if let Ok(mut cursor) = stmt.bind_buffer(&mut buf) {
+                        while let Ok(Some(batch)) = cursor.fetch() {
+                            for row in 0..batch.num_rows() {
+                                if let (Some(fp), Some(fn_)) =
+                                    (col_str(&batch, 0, row), col_str(&batch, 1, row))
+                                {
+                                    documents.push(DocumentSnapshot {
+                                        webdav_path: format!("{fp}{fn_}"),
+                                        file_name: fn_,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        (fname, lname, pool_members, review_records, documents)
+    };
+
+    // ── PostgreSQL ────────────────────────────────────────────
+
+    #[derive(sqlx::FromRow)]
+    struct SrRow {
+        id: Uuid,
+        pool_no: String,
+        part_key: String,
+        review_type: String,
+        status: String,
+        decision: Option<String>,
+        sent_to_ceo_at: Option<chrono::DateTime<chrono::Utc>>,
+        decided_at: Option<chrono::DateTime<chrono::Utc>>,
+        updated_at: chrono::DateTime<chrono::Utc>,
+    }
+
+    let sr_rows = sqlx::query_as::<_, SrRow>(
+        "SELECT id, pool_no, part_key, review_type, status, decision, \
+         sent_to_ceo_at, decided_at, updated_at \
+         FROM status_reviews WHERE part_no = $1 ORDER BY updated_at DESC",
+    )
+    .bind(&part_no)
+    .fetch_all(pg)
+    .await
+    .unwrap_or_default();
+
+    let status_reviews: Vec<StatusReviewSnapshot> = sr_rows
+        .into_iter()
+        .map(|r| StatusReviewSnapshot {
+            id: r.id.to_string(),
+            pool_no: r.pool_no,
+            part_key: r.part_key,
+            review_type: r.review_type,
+            pg_status: r.status,
+            decision: r.decision,
+            sent_to_ceo_at: r.sent_to_ceo_at.map(|t| t.to_rfc3339()),
+            decided_at: r.decided_at.map(|t| t.to_rfc3339()),
+            updated_at: r.updated_at.to_rfc3339(),
+        })
+        .collect();
+
+    #[derive(sqlx::FromRow)]
+    struct SqRow {
+        id: Uuid,
+        operation: String,
+        status: String,
+        attempts: i32,
+        last_error: Option<String>,
+        created_at: chrono::DateTime<chrono::Utc>,
+        completed_at: Option<chrono::DateTime<chrono::Utc>>,
+    }
+
+    let sq_rows = sqlx::query_as::<_, SqRow>(
+        "SELECT id, operation, status, attempts, last_error, created_at, completed_at \
+         FROM informix_sync_queue \
+         WHERE payload->>'part_no' = $1 \
+         ORDER BY created_at DESC LIMIT 30",
+    )
+    .bind(&part_no)
+    .fetch_all(pg)
+    .await
+    .unwrap_or_default();
+
+    let sync_queue: Vec<SyncQueueSnapshot> = sq_rows
+        .into_iter()
+        .map(|r| SyncQueueSnapshot {
+            id: r.id.to_string(),
+            operation: r.operation,
+            status: r.status,
+            attempts: r.attempts,
+            last_error: r.last_error,
+            created_at: r.created_at.to_rfc3339(),
+            completed_at: r.completed_at.map(|t| t.to_rfc3339()),
+        })
+        .collect();
+
+    #[derive(sqlx::FromRow)]
+    struct HistRow {
+        id: Uuid,
+        part_no: String,
+        review_type: String,
+        action: String,
+        actor_email: Option<String>,
+        notes: Option<String>,
+        acted_at: chrono::DateTime<chrono::Utc>,
+    }
+
+    let hist_rows = sqlx::query_as::<_, HistRow>(
+        "SELECT id, part_no, review_type, action, actor_email, notes, acted_at \
+         FROM review_history WHERE part_no = $1 ORDER BY acted_at DESC",
+    )
+    .bind(&part_no)
+    .fetch_all(pg)
+    .await
+    .unwrap_or_default();
+
+    let history: Vec<ReviewHistoryEntry> = hist_rows
+        .into_iter()
+        .map(|r| ReviewHistoryEntry {
+            id: r.id.to_string(),
+            part_no: r.part_no,
+            review_type: r.review_type,
+            action: r.action,
+            actor_email: r.actor_email,
+            notes: r.notes,
+            acted_at: r.acted_at.to_rfc3339(),
+        })
+        .collect();
+
+    Ok(Json(ParticipantCheck {
+        part_no,
+        fname,
+        lname,
+        pool_members,
+        review_records,
+        status_reviews,
+        sync_queue,
+        documents,
+        history,
+    }))
+}
 
 /// POST /api/reviews/sync-now — triggers immediate review queue refresh from Informix.
 pub async fn sync_now_handler(
