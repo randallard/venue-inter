@@ -33,9 +33,12 @@ Build the two-stage review workflow: admin prep queue and CEO decision interface
 | `/api/reviews/ceo` | GET | CEO queue (pending_ceo records only) |
 | `/api/reviews/:part_key` | GET | Participant data + docs for review |
 | `/api/reviews/:part_key/document` | GET | Scanned questionnaire document |
+| `/api/reviews/:part_key/verify` | GET | Async Informix verify — returns field diff + document list delta |
+| `/api/reviews/:part_key/reconcile` | POST | Pull fresh Informix data into Postgres; cache any new documents; return changelog |
 | `/api/reviews/excuse/process` | POST | Admin processes excuse (send to CEO or action) |
 | `/api/reviews/disqualify/process` | POST | Admin processes disqualification |
-| `/api/reviews/send-to-ceo` | POST | Admin sends prepped record to CEO queue |
+| `/api/reviews/send-to-ceo` | POST | Admin sends prepped record to CEO queue — blocks if CEO decision already exists |
+| `/api/reviews/recall` | POST | Admin recalls a pending_ceo record — no confirmation required |
 | `/api/reviews/send-back` | POST | CEO sends record back to admin |
 | `/api/reviews/ceo/decide` | POST | CEO makes final determination |
 | `/api/reviews/records/:part_no` | GET | Review history |
@@ -56,6 +59,9 @@ interface ReviewRecord {
   status: 'pending_admin' | 'pending_ceo' | 'completed' | 'sent_back';
   admin_notes: string | null;
   submitted_at: string;
+  data_stale: boolean;
+  stale_detected_at: string | null;
+  data_version: number;  // incremented on each reconcile; CEO page polls on this
 }
 
 interface ReviewDetail {
@@ -64,6 +70,36 @@ interface ReviewDetail {
   questionnaire: QuestionnaireDetail | null;
   scanned_doc_url: string | null;
   history: ReviewHistoryEntry[];
+}
+
+interface VerifyResult {
+  matches: boolean;
+  field_diffs: FieldDiff[];         // fields where Informix differs from Postgres
+  documents_added: string[];        // document identifiers in Informix not in document_cache
+  documents_removed: string[];      // in cache but no longer in Informix part_image
+}
+
+interface FieldDiff {
+  field: string;
+  postgres_value: string | null;
+  informix_value: string | null;
+}
+
+interface ReconcileResult {
+  changelog: FieldDiff[];           // what changed (before vs after); empty if nothing changed
+  documents_cached: number;         // count of newly fetched documents
+}
+
+interface SendToCeoResult {
+  sent: boolean;
+  blocked_by_decision: CeoDecisionSummary | null;  // non-null if CEO already decided
+}
+
+interface CeoDecisionSummary {
+  decision: string;
+  decided_at: string;
+  decided_by: string;
+  informix_sync_status: 'pending' | 'completed' | 'failed';
 }
 
 interface ReviewDecision {
@@ -92,6 +128,8 @@ interface CeoReviewState {
 
 `GET /api/reviews/excuse/admin` and `GET /api/reviews/disqualify/admin` —
 query Informix `review_record` table for records with status `P` (pending admin).
+Include `data_stale` and `stale_detected_at` from `status_reviews` in the response
+so the admin queue can surface stale indicators per record.
 
 **Verify:** Returns seed review records. Count matches seed data.
 
@@ -100,13 +138,42 @@ query Informix `review_record` table for records with status `P` (pending admin)
 `/reviews/excuse` — table of pending excuse requests. Click a row to open
 individual review. Count badge in navbar.
 
-**Verify:** Records display with correct data from seed.
+Each record fires an async verify against Informix on page load (non-blocking).
+Records show a per-record status indicator:
+- Gray "checking..." while verify is in flight
+- Green checkmark if data matches
+- Yellow "Updates available" badge if `VerifyResult.matches === false`
+
+Clicking "Updates available" navigates to the individual review where admin
+can reconcile.
+
+**Verify:** Records display with correct data from seed. Async verify fires
+and updates indicators without blocking the page load.
 
 ### 5.3 Build admin disqualification queue page
 
-`/reviews/disqualify` — same layout as excuse queue.
+`/reviews/disqualify` — same layout as excuse queue including async verify
+and per-record indicators.
 
 **Verify:** Disqualification records display.
+
+### 5.3a Admin review screen stale banner
+
+When any records in the admin queue have `data_stale = true` (flagged by the
+stale cron — see Phase 7), a banner appears at the top of the admin review
+screen:
+
+> "2 records sent to CEO have updated data — review required"
+
+Each flagged record is linked from the banner. The banner is dismissed
+automatically when no stale records remain.
+
+This is distinct from the per-record async verify on the queue page — the
+banner reflects records already sent to CEO where drift was detected by the
+background cron, not records still in the admin queue.
+
+**Verify:** Banner appears when `data_stale` records exist. Disappears after
+recall + reconcile.
 
 ### 5.4 Backend: Individual review data API
 
@@ -122,57 +189,109 @@ questionnaire responses and any stored documents.
 - Questionnaire responses
 - Document viewer (scanned doc if available)
 - Admin notes field
-- **"Send to CEO"** button (becomes active once admin has reviewed)
+- **"Send to CEO"** button
+- **"Reconcile"** button — visible when verify has returned differences
 
-**Verify:** All data panels render. Send to CEO moves record to CEO queue.
+**Reconcile flow:**
+1. Admin clicks "Reconcile"
+2. `POST /api/reviews/:part_key/reconcile` — overwrites Postgres with Informix data, caches new documents
+3. Page shows a changelog summary: "Name updated · 1 new document added"
+4. Changelog is informational only — admin reviews it and decides whether to proceed
 
-### 5.6 Backend: Send to CEO
+**Verify:** Reconcile updates Postgres and shows changelog. New documents appear
+in the document viewer.
 
-`POST /api/reviews/send-to-ceo` — updates `status_reviews.status` to
-`pending_ceo`, records action in `review_history`, updates Informix
-`review_record.status` to `S`.
+### 5.6 Backend: Verify and Reconcile APIs
 
-**Verify:** Record disappears from admin queue, appears in CEO queue.
+`GET /api/reviews/:part_key/verify`:
+- Query Informix for all displayed fields + `part_image` document identifiers
+- Compare against Postgres `status_reviews` / `participant` data and `document_cache`
+- Return `VerifyResult` — field diffs and document deltas
+- Non-blocking from the frontend perspective; fires async per record
 
-### 5.7 Backend: CEO queue API
+`POST /api/reviews/:part_key/reconcile`:
+- Capture current Postgres state (for changelog)
+- Overwrite Postgres participant fields with Informix values
+- Query `part_image` for document identifiers not in `document_cache`; trigger WebDAV fetch for each
+- Compute and return `ReconcileResult` changelog
+- Reconcile always writes regardless of record workflow status (`pending_admin`, `pending_ceo`, etc.)
+- Increment `data_version` on `status_reviews`
+
+**Verify:** Reconcile on a seed record with known differences updates Postgres
+and returns correct changelog.
+
+### 5.7 Backend: Send to CEO (with blocking check)
+
+`POST /api/reviews/send-to-ceo`:
+- Before any write, check whether a CEO decision already exists for this `part_key`
+  (`status_reviews.status IN ('completed', 'sent_back')` or a decision row in `review_history`)
+- If decision exists: return `{ sent: false, blocked_by_decision: CeoDecisionSummary }`
+  including the Informix sync status for that decision
+- If no decision: proceed with send — update `status_reviews.status` to `pending_ceo`,
+  record action in `review_history`, update Informix `review_record.status` to `S`
+
+**Verify:** Record disappears from admin queue, appears in CEO queue when no
+prior decision exists. Returns blocked response with decision details when CEO
+has already decided.
+
+### 5.7a Frontend: Send to CEO blocking modal
+
+When `send-to-ceo` returns `blocked_by_decision`:
+
+Display a blocking modal:
+
+> **CEO Decision Already Recorded**
+> CEO decided: [Temporary Excuse] on [date] by [name]
+> Informix sync: [Pending / Completed / Failed]
+> Further processing for this participant must be handled manually.
+
+Modal has a single close button. No re-send option. Admin handles out of band
+(email, phone). Record remains in its current state.
+
+**Verify:** Modal appears with correct decision details and sync status.
+
+### 5.8 Backend: Recall
+
+`POST /api/reviews/recall`:
+- No confirmation required
+- If `status_reviews.status = 'pending_ceo'`: flip to `pending_admin`, clear `data_stale` / `stale_detected_at`, queue `reopen_review_record` in `informix_sync_queue`
+- If `status_reviews.status` is already `completed` or `sent_back` (CEO decided concurrently): do nothing, return current state — the re-send attempt will surface the blocking modal
+- Log recall action in `review_history`
+
+**Verify:** Record flips to `pending_admin` immediately. CEO queue reflects
+change on next poll. Concurrent CEO decision is not overwritten.
+
+### 5.9 Backend: CEO queue API
 
 `GET /api/reviews/ceo` — returns only records with `status = 'pending_ceo'`.
+Includes `data_version` per record for client-side change detection.
 Access requires `ceo-review` group.
 
 **Verify:** Only sent records visible. Non-CEO user gets 403.
 
-### 5.8 Build CEO queue page
+### 5.10 Build CEO queue page
 
-`/reviews/ceo` — streamlined list, no navbar to rest of app for CEO role.
-Shows only: participant name, review type, show/pool, date sent.
-Click a row to open CEO decision view.
+`/reviews/ceo` — streamlined combined scrollable page, all pending cases inline
+with decision forms. No navbar to rest of app for CEO role.
 
-**Verify:** CEO user sees only this page. Non-CEO cannot access it.
+**Polling:**
+- Page polls `GET /api/reviews/ceo` every 30 seconds
+- Records recalled since last load are removed from the page quietly
+- If a record's `data_version` has incremented since the page loaded, a banner
+  appears on that specific record:
+  > "This record was updated since it was loaded — [field summary e.g. 'address updated · 1 document added']"
+- The banner is informational only — CEO is never blocked from submitting a decision
+- Decision buttons are never disabled by poll results
 
-### 5.9 Build CEO decision view
+**Verify:** Recalled records disappear on next poll. Updated records show
+per-record banner with change summary. CEO can still submit decision on a
+record showing the update banner.
 
-`/reviews/ceo/:part_key` — focused single-case view:
-- Participant data (read-only)
-- Questionnaire and scanned document
-- Admin notes (read-only)
-- **CEO decision buttons:**
-  - Re-qualify (status 2)
-  - Disqualify (status 6)
-  - Permanent Excuse (status 5)
-  - Temporary Excuse (status 7)
-  - Send Back to Admin
-- CEO notes field (required for all decisions)
-
-No navigation to other parts of the system from this view.
-
-**Verify:** Each decision button executes correctly, updates pool_member status,
-records in review_history.
-
-### 5.10 Backend: CEO decision processing
+### 5.11 Backend: CEO decision processing
 
 `POST /api/reviews/ceo/decide` — **async write pattern, no ODBC on the hot path.**
 
-All writes are a single PostgreSQL transaction (fast, local):
+All writes are a single PostgreSQL transaction:
 
 ```
 BEGIN;
@@ -186,53 +305,24 @@ BEGIN;
 COMMIT;
 ```
 
-Informix is updated by the sync cron (Phase 7), not inline.
+**Idempotency:** If `status` is already `completed` or `sent_back`, return
+existing state as 200. Handles the case where the transaction committed but
+the response was lost.
 
-**Idempotency:** If `status_reviews.status` is already `completed` or `sent_back`
-when the request arrives, return the existing state as a 200 (not an error).
-This handles the case where the transaction committed but the response was lost.
-
-**Verify:** All PostgreSQL tables updated correctly. Two sync queue rows inserted.
-Re-submitting the same decision returns 200 with existing state.
-
-#### Durability guarantee for CEO decision
-
-The decision is durable the moment the PostgreSQL transaction commits — PostgreSQL
-WAL ensures it survives crashes and restarts. The sequence is:
-
-1. CEO clicks → browser disables decision buttons immediately (prevents double-submit)
-2. POST reaches Axum → transaction opens
-3. Transaction commits → decision is **durable and irrecoverable**
-4. Axum returns 200 → browser animates record out of queue
-
-**Failure cases, none result in data loss:**
-
-| Failure point | What happens | CEO sees |
-|---|---|---|
-| Network drops before POST reaches server | No write occurred | Timeout; buttons re-enable, can retry |
-| Server crash mid-transaction | PG rolls back atomically | Same as above |
-| Transaction commits, response lost | Decision is saved | Timeout; re-fetch detects `completed`, browser treats as success |
-| CEO double-clicks | Guard clause in UPDATE prevents double-write | Second request returns existing state |
-
-**Browser behaviour on error:**
-- On 5xx or timeout: re-fetch the record status before showing an error
-- If record is now `completed` or `sent_back`: treat as success (record disappears cleanly)
-- If still `pending_ceo`: re-enable buttons with non-intrusive inline error on the record
-- Do not interrupt flow if CEO has already navigated to the next record
-
-This matches the current system's UX contract: record disappears on success,
-error is surfaced inline on the record rather than as a modal that blocks flow.
+CEO is never blocked — decision commits regardless of whether the record
+was reconciled after being sent, or whether the poll banner was shown.
 
 **Verify:** All PostgreSQL tables updated correctly. Two sync queue rows inserted.
 Re-submitting the same decision returns 200 with existing state.
 
-### 5.11 Build review records history
+### 5.12 Build review records history
 
-`/reviews/records/:part_no` — complete review history for a participant.
+`/reviews/records/:part_no` — complete review history for a participant,
+including reconcile events, stale detections, recall attempts, and decisions.
 
 **Verify:** Shows all actions from seed data and any test actions.
 
-### 5.12 CEO review state toggle
+### 5.13 CEO review state toggle
 
 Admin can toggle CEO review to maintenance mode:
 - `GET/POST /api/reviews/ceo-state`
@@ -241,68 +331,75 @@ Admin can toggle CEO review to maintenance mode:
 
 **Verify:** Toggle updates state. CEO queue shows maintenance message.
 
-### 5.13 Write E2E tests
+### 5.14 Write E2E tests
 
-1. Admin excuse queue loads with seed records
+1. Admin excuse queue loads with seed records; async verify fires and updates indicators
 2. Admin disqualify queue loads
 3. Individual review — all panels render, docs load
-4. Send to CEO — record moves to CEO queue
-5. CEO queue (ceo-review role) — only prepped records visible, role gate works
-6. CEO decision — each action updates DB correctly
-7. Send back to admin — record returns to admin queue
-8. Review history — full audit trail visible
-9. CEO maintenance mode — queue blocked, admin sees toggle
+4. Reconcile — changelog displays, Postgres updated, new documents visible
+5. Send to CEO — record moves to CEO queue when no prior decision
+6. Send to CEO blocked — modal appears with decision details when CEO already decided
+7. Recall — record returns to admin queue immediately, no confirmation
+8. CEO queue (ceo-review role) — only prepped records visible, role gate works
+9. CEO poll — recalled records disappear; updated records show per-record banner
+10. CEO decision — each action updates DB correctly; CEO never blocked
+11. Send back to admin — record returns to admin queue
+12. Review history — full audit trail including reconcile and stale events
+13. CEO maintenance mode — queue blocked, admin sees toggle
+14. Stale banner — appears on admin review screen when pending_ceo records are flagged
 
 **Verify:** Full workflow: admin preps → sends to CEO → CEO decides.
+Reconcile and stale flows verified independently.
 
 ## Implementation Status
 
 ### Backend (Axum/Rust)
-- [x] 5.1 Admin excuse + disqualify queue APIs (`admin_excuse_queue_handler`, `admin_disqualify_queue_handler`)
-- [x] 5.4 Individual review data API (`review_detail_handler`)
-- [x] 5.6 Send-to-CEO API (`send_to_ceo_handler`)
-- [x] 5.7 CEO queue API (`ceo_queue_handler`)
-- [x] 5.10 CEO decision API (`ceo_decide_handler`) — PG-only, sync queue for Informix
-- [x] 5.11 Review history API (`review_history_handler`)
-- [x] 5.12 CEO state toggle (`get_ceo_state_handler`, `set_ceo_state_handler`)
-- [x] Pending counts API (`pending_counts_handler`)
-- [x] Document handling (`crates/server/src/documents.rs`):
-  - `GET /api/reviews/:part_key/documents` — queries Informix `part_image` + `pool_member.scan_code`, upserts `document_cache`, fires background WebDAV fetch for pending rows; returns `{file_name, webdav_path}` per file
-  - `GET /api/documents/view?path=<webdav_path>` — serves document for viewing; checks `document_cache` first (populated during active review), falls back to live WebDAV proxy on cache miss; nothing is written on a proxy hit
-- [x] Sync status API (`sync_status_handler`):
-  - `GET /api/reviews/sync-status` — cross-system view merging Informix `review_record`, PG `status_reviews`, and `informix_sync_queue`; computes per-record health (`ok`, `active`, `syncing`, `warning`, `error`, `unprocessed`); sorted by severity
+- [x] 5.1 Admin excuse + disqualify queue APIs
+- [x] 5.4 Individual review data API
+- [x] 5.7 Send-to-CEO API — **needs update: add blocking check for prior CEO decision**
+- [x] 5.9 CEO queue API — **needs update: include `data_version` in response**
+- [x] 5.11 CEO decision API — PG-only, sync queue for Informix
+- [x] 5.12 Review history API
+- [x] 5.13 CEO state toggle
+- [x] Pending counts API
+- [x] Document handling (`crates/server/src/documents.rs`)
+- [x] Sync status API
+- [ ] `GET /api/reviews/:part_key/verify` — not built
+- [ ] `POST /api/reviews/:part_key/reconcile` — not built
+- [ ] `POST /api/reviews/recall` — not built
+- [ ] Send-to-CEO blocking check — not built
+- [ ] `data_version` on CEO queue response — not built
 
 ### Frontend (SvelteKit)
-- [x] 5.2 Admin excuse queue (`/reviews/excuse`)
-- [x] 5.3 Admin disqualify queue (`/reviews/disqualify`)
-- [x] 5.5 Individual review + Send-to-CEO (`/reviews/excuse/[part_key]`, `/reviews/disqualify/[part_key]`)
-- [x] 5.8 / 5.9 CEO combined scrollable page (`/reviews/ceo`) — **design change from plan**: all pending cases
-  expanded inline with decision forms on a single scrollable page; no separate per-case navigation route.
-  CEO users are redirected here from `/` via `+layout.ts`.
-- [x] 5.11 Review history page (`/reviews/records/[part_no]`)
-- [x] 5.12 CEO state toggle (maintenance mode banner in CEO queue page)
-- [x] Sync status admin page (`/reviews/sync`) — filter chips by health category, table with
-  Informix status / PG status / sync queue state / error details; linked from reviews landing page
+- [x] Admin excuse queue (`/reviews/excuse`)
+- [x] Admin disqualify queue (`/reviews/disqualify`)
+- [x] Individual review + Send-to-CEO (`/reviews/excuse/[part_key]`, `/reviews/disqualify/[part_key]`)
+- [x] CEO combined scrollable page (`/reviews/ceo`)
+- [x] Review history page (`/reviews/records/[part_no]`)
+- [x] CEO state toggle
+- [x] Sync status admin page (`/reviews/sync`)
+- [ ] Per-record async verify indicators on admin queue pages — not built
+- [ ] Reconcile button and changelog display on individual review — not built
+- [ ] Send-to-CEO blocking modal — not built
+- [ ] Recall button — not built
+- [ ] Stale banner on admin review screen — not built
+- [ ] CEO poll with per-record update banner — not built
 
-### Testing (5.13)
-- [x] Puppeteer E2E tests written (`tests/reviews.test.ts`); run with `pnpm test:e2e`
-- [ ] E2E tests for document caching and sync status page not yet written
+### Testing (5.14)
+- [x] `tests/reviews.test.ts` — existing tests
+- [ ] Verify, reconcile, recall, blocking modal, CEO poll banner tests — not written
 
 ## Notes
 
-- **Document lifecycle**: WebDAV credentials are optional (`WEBDAV_BASE_URL`, `WEBDAV_USER`,
-  `WEBDAV_PASSWORD` in `.env`). `document_cache` rows are created when an active case is loaded
-  and deleted by the Phase 7 sync cron once the Informix sync ops for that participant complete.
-  After the cache is cleared, views fall back to live WebDAV proxy with no re-caching. The
-  `document_cache` table is in `migrations/init.sql`. See `docs/dev-setup.md` §9 for local
-  filesystem testing instructions.
-
-- **Sync status**: The `/reviews/sync` page shows real-time queue health but does **not** process
-  the queue — that is Phase 7 (`sync_informix_queue` cron). The page is an admin diagnostic tool.
-
-- **CEO route change**: The original plan had `/reviews/ceo/[part_key]` as a separate per-case
-  decision view. The implemented design is a single combined scrollable page at `/reviews/ceo`
-  with all cases inline. This was a deliberate UX decision to reduce navigation for the CEO role.
+- **Reconcile is always safe to run** — it writes regardless of workflow status and never
+  blocks any subsequent action. It is independent of the send-to-CEO gate.
+- **CEO is never blocked** — poll results and update banners are informational only.
+  The decision guard clause in `ceo_decide_handler` protects against double-write,
+  not against stale data.
+- **`data_version`** on `status_reviews` is incremented by each reconcile. The CEO
+  poll compares the version seen at page load against the current API response to
+  determine whether to show the per-record update banner.
+- **Document lifecycle**: see Phase 7 for document cache cleanup on sync completion.
 
 ## Exit Criteria
 
@@ -314,6 +411,12 @@ Admin can toggle CEO review to maintenance mode:
 - [x] Review history shows complete audit trail
 - [x] CEO maintenance mode works
 - [x] Document metadata returned for participants with `part_image` records
-- [x] Sync status page shows cross-system health for all ex/dq records
-- [ ] All Puppeteer tests pass (run `pnpm test:e2e` after verifying locally)
+- [x] Sync status page shows cross-system health
+- [ ] Async verify fires per record on admin queue pages
+- [ ] Reconcile updates Postgres and shows changelog
+- [ ] Recall works without confirmation
+- [ ] Send-to-CEO blocking modal appears when CEO has already decided
+- [ ] CEO poll removes recalled records and shows per-record update banners
+- [ ] Stale banner appears on admin review screen
+- [ ] All Puppeteer tests pass
 - [ ] Developer has verified full workflow locally

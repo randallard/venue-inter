@@ -2,8 +2,8 @@
 
 ## Goal
 
-Implement cron-driven background tasks for data synchronization, report
-pre-generation, and review queue refresh.
+Implement cron-driven background tasks for data synchronization, review queue
+refresh, and stale record detection.
 
 ## Task Types
 
@@ -11,20 +11,26 @@ pre-generation, and review queue refresh.
 |---|---|---|
 | `sync_informix_queue` | Cron every 2 min | Process pending informix_sync_queue rows, write to Informix via ODBC |
 | `refresh_review_queue` | Cron every 5 min | Pull latest Informix review_record data into Postgres status_reviews |
-| `sync_participant_data` | Cron nightly | Detect participant record changes in Informix, log deltas |
-| `generate_draw_export` | On-demand (API) | Generate Excel draw export file |
-| `replace_staff` | On-demand (API) | Replace a staff member across future pool sessions |
+| `check_pending_ceo_staleness` | Cron every 15 min | Verify pending_ceo records against Informix; flag drifted records |
+
+## Removed Tasks
+
+`sync_participant_data` (nightly participant snapshot diff) has been removed from
+the plan. Participant data is treated as live Informix reads throughout the app.
+The verify/reconcile flow on the admin review screen (Phase 5) replaces this —
+admins get per-record data freshness checks on demand rather than a batch nightly
+diff log. The `informix_sync_queue` write-back remains the only direction where
+local state flows back to Informix.
 
 ## Cron Schedule
 
 ```
-*/2 * * * *   sync_informix_queue
-*/5 * * * *   refresh_review_queue
-0   2 * * *   sync_participant_data
+*/2  * * * *   sync_informix_queue
+*/5  * * * *   refresh_review_queue
+*/15 * * * *   check_pending_ceo_staleness
 ```
 
-Schedules stored in environment config or a cron table; executed by a Tokio
-task spawned at startup (following ifxinter's `task_runner` pattern).
+Schedules executed by a Tokio task spawned at startup.
 
 ## Backend Changes
 
@@ -40,6 +46,7 @@ the corresponding Informix ODBC write for each.
 | `update_pool_member_status` | `UPDATE pool_member SET status = :new_status WHERE part_no = :part_no AND pool_no = :pool_no` |
 | `close_review_record` | `UPDATE review_record SET status = 'C' WHERE part_no = :part_no AND pool_no = :pool_no` |
 | `send_review_record` | `UPDATE review_record SET status = 'S' WHERE part_no = :part_no AND pool_no = :pool_no` |
+| `reopen_review_record` | `UPDATE review_record SET status = 'P' WHERE part_no = :part_no AND pool_no = :pool_no` |
 
 **Per-row logic:**
 1. Execute the Informix write
@@ -48,25 +55,15 @@ the corresponding Informix ODBC write for each.
 4. After 3 failed attempts: set `status = 'failed'` — dashboard turns red for this row
 5. On any failure: create a ticket with the error and payload for IT visibility
 
-Failed rows are **not retried automatically** after 3 attempts. An admin must
-resolve the underlying issue and manually re-queue or apply the fix. The ticket
-created on failure links to the specific sync row.
+Failed rows are not retried automatically. Admin resolves the underlying issue
+and manually re-queues or applies the fix.
 
-Dashboard reflects the live queue state: pending count (yellow), failed count (red).
-
-**Idempotency:** Each row has a unique UUID. The task processes each row once.
-Re-running the cron cannot double-apply a completed row.
-
-**Document cache cleanup:** When all sync ops for a participant complete successfully
-(i.e. all `informix_sync_queue` rows for that `part_no`/`pool_no` reach `status = 'completed'`),
-delete the corresponding `document_cache` rows:
+**Document cache cleanup:** When all sync ops for a participant complete
+successfully, delete corresponding `document_cache` rows:
 
 ```sql
 DELETE FROM document_cache WHERE part_no = :part_no;
 ```
-
-This frees binary storage after the case is closed. Subsequent document views (e.g. from the
-participant check page) fall back to the live WebDAV proxy without re-caching.
 
 **Verify:** After a CEO decision creates two sync queue rows, running the task
 updates Informix and marks both rows completed. Dashboard returns to green.
@@ -74,85 +71,134 @@ Running again is a no-op.
 
 ### 7.1 Review queue refresh task
 
-Queries Informix `review_record` for any records with `status IN ('P', 'S')`
-not yet in `status_reviews`, and inserts them. Updates existing records if
-admin notes have changed.
+Queries Informix `review_record` for records with `status IN ('P', 'S')` not
+yet in `status_reviews`, and inserts them. Updates existing records if admin
+notes have changed.
 
-Does **not** overwrite records with `status = 'pending_ceo'` or `'completed'`
-(CEO queue takes precedence once a record has been sent).
+Does not overwrite records with `status = 'pending_ceo'` or `'completed'`.
 
-### 7.2 Participant data sync task
+### 7.2 Pending CEO staleness check task
 
-Compares a snapshot of `participant` against a stored hash. Logs additions,
-deactivations, and address changes to the task result. Does not modify data —
-admin reviews the delta log.
+For all `status_reviews` records with `status = 'pending_ceo'`, fire the same
+Informix verify logic used by the admin review screen:
+
+- Query Informix for all displayed participant fields
+- Query `part_image` for current document identifiers
+- Compare against Postgres data and `document_cache`
+
+If any field differs or new documents exist:
+- Set `data_stale = true`, `stale_detected_at = now()` on `status_reviews`
+- Dashboard stale card count increments (yellow/red per count)
+- Admin review screen banner appears for flagged records
+
+If data matches and record was previously flagged:
+- Clear `data_stale` and `stale_detected_at` (e.g. admin reconciled and re-sent)
+
+**Verify:** After modifying a seed participant record in Informix, running the
+cron flags the corresponding `pending_ceo` record. Dashboard card updates.
+After reconcile and re-send, cron clears the flag on the next run.
 
 ### 7.3 Task result storage
 
-Both task types write structured JSON to `tasks.result_summary` and create
-a `ticket` on failure (existing pattern).
+All cron tasks write structured JSON to `tasks.result_summary`. Failures
+create a `ticket` (existing pattern).
+
+## Schema Changes
+
+The following columns are added to `status_reviews` (`migrations/init.sql`):
+
+```sql
+ALTER TABLE status_reviews
+  ADD COLUMN data_stale        BOOLEAN   NOT NULL DEFAULT FALSE,
+  ADD COLUMN stale_detected_at TIMESTAMP,
+  ADD COLUMN data_version      INTEGER   NOT NULL DEFAULT 0;
+```
+
+- `data_stale` — set by the staleness cron; cleared on reconcile or when cron
+  confirms data matches again
+- `stale_detected_at` — timestamp of first detection in the current stale window;
+  useful for admin to judge urgency
+- `data_version` — incremented by each reconcile; used by the CEO page poll to
+  detect whether a record has been updated since the page loaded and show the
+  per-record update banner
 
 ## Chunks
 
-### 7.1 Review queue refresh cron
+### 7.1 Informix sync queue cron
 
-Implement `task_runner::spawn_review_queue_refresh`. Schedule in startup.
+Implement `task_runner::spawn_sync_queue_cron`. Schedule in startup.
 
-**Verify:** After seed data load, running the task populates `status_reviews`
-with the Informix `review_record` rows. Running again is idempotent.
+**Verify:** Sync queue rows processed, Informix updated, rows marked completed.
+Document cache cleaned up on full completion. Dashboard reflects queue state.
 
-### 7.2 Participant sync cron
+### 7.2 Review queue refresh cron
 
-Implement `task_runner::spawn_participant_sync`. Schedule in startup.
+Implement `task_runner::spawn_review_refresh_cron`. Schedule in startup.
 
-**Verify:** Delta log produces correct output against seed data.
+**Verify:** New Informix review_record rows appear in status_reviews after cron
+runs. Existing pending_ceo records not overwritten.
 
-### 7.3 Expose task status in UI
+### 7.3 Pending CEO staleness cron
 
-`/tasks` page (already built in Phase 1) shows cron task history.
-Add task type labels and scheduled-task indicators.
+Implement `task_runner::spawn_staleness_check_cron`. Schedule in startup.
 
-**Verify:** Cron tasks appear in the task list with correct status.
+For each `pending_ceo` record:
+1. Call the same verify logic as `GET /api/reviews/:part_key/verify`
+2. Update `data_stale` / `stale_detected_at` accordingly
+3. Log result to `tasks.result_summary`
 
-### 7.4 Write E2E tests
+**Verify:** Modified seed record is flagged within 15 minutes. Dashboard card
+count is correct. Reconcile + re-send clears flag on next cron run.
 
-1. Review queue refresh runs — status_reviews populated
-2. Participant sync runs — result_summary contains valid JSON
-3. Task list shows cron tasks
+### 7.4 Expose task status in UI
+
+`/tasks` page shows cron task history with type labels and scheduled-task
+indicators.
+
+**Verify:** All three cron types appear in the task list with correct status
+and result summaries.
+
+### 7.5 Write E2E tests
+
+1. Sync queue cron processes pending rows — Informix updated, rows completed
+2. Review queue refresh — status_reviews populated from Informix
+3. Staleness cron — flags pending_ceo record when Informix data differs;
+   dashboard card count updates; flag cleared after reconcile
+4. Task list shows all three cron types with correct history
 
 **Verify:** All tests pass.
 
 ## Implementation Status
 
 ### Infrastructure
-- [x] `informix_sync_queue` table exists (`migrations/init.sql`); populated by `ceo_decide_handler` (Phase 5)
-- [x] `dashboard_status_handler` returns `informix_sync_pending` and `informix_sync_failed` counts
-- [x] Sync status admin page (`/reviews/sync`) — per-record health badges, error details, sync queue state
+- [x] `informix_sync_queue` table exists; populated by `ceo_decide_handler`
+- [x] `dashboard_status_handler` returns sync pending/failed counts
+- [x] Sync status admin page (`/reviews/sync`)
+- [ ] `data_stale`, `stale_detected_at`, `data_version` columns on `status_reviews` — not added
 
 ### Cron tasks (`crates/server/src/sync.rs`)
-- [x] 7.0 `process_sync_queue` — drains `informix_sync_queue`; executes Informix ODBC writes; marks rows completed/failed; after 3 attempts marks `status = 'failed'`; spawned every 2 min via `spawn_sync_queue_cron`
-- [x] 7.1 `refresh_review_queue` — inserts new Informix `review_record` (status='P') rows into PG `status_reviews` (pending_admin); idempotent ON CONFLICT DO NOTHING; spawned every 5 min via `spawn_review_refresh_cron`
-- [ ] 7.2 `sync_participant_data` nightly cron — not yet built
-- [ ] 7.3 Cron task history in `/tasks` UI — not yet built
+- [x] 7.0 `process_sync_queue` — drains queue, executes Informix writes, marks completed/failed; `reopen_review_record` operation **needs to be added**
+- [x] 7.1 `refresh_review_queue` — idempotent insert of new Informix review_record rows
+- [ ] 7.2 `check_pending_ceo_staleness` — not yet built
+- [ ] 7.4 Cron task history in `/tasks` UI — not yet built
 
 ### Per-record sync API
-- [x] `POST /api/reviews/sync-status/sync/:part_key` — immediately processes pending sync queue rows for one record; returns `{processed, succeeded, failed, errors[]}`
-- [x] Sync button in `/reviews/sync` UI — triggers per-record sync, updates health badge inline
+- [x] `POST /api/reviews/sync-status/sync/:part_key`
+- [x] Sync button in `/reviews/sync` UI
 
 ### Record lookup API
-- [x] `GET /api/reviews/sync-status/lookup/:query` — accepts part_no or part_key; queries Informix review_record (all statuses, not just P) and PG; returns `SyncStatusResponse` — works for closed/processed records not in the main listing
-- [x] Lookup input in `/reviews/sync` UI — shows results in a highlighted panel above the main table
+- [x] `GET /api/reviews/sync-status/lookup/:query`
 
 ## Exit Criteria
 
 - [x] Informix sync queue task processes pending rows and writes to Informix
-- [ ] Failed rows after 3 attempts set status = 'failed' and create a ticket (ticket creation not yet built)
-- [x] Dashboard pending count reflects queue state
 - [x] Review queue refresh runs and populates status_reviews from Informix
 - [x] All implemented tasks are idempotent
-- [x] Per-record sync trigger works from the admin UI
-- [x] Lookup works for any participant regardless of queue state
-- [ ] Participant sync runs and produces valid delta log
-- [ ] Task failures create tickets
+- [x] Per-record sync trigger works from admin UI
+- [ ] `reopen_review_record` operation added to sync queue task
+- [ ] `data_stale`, `stale_detected_at`, `data_version` columns added to status_reviews
+- [ ] Staleness cron built and scheduled
+- [ ] Dashboard stale card reflects cron output
+- [ ] Failed rows after 3 attempts create a ticket
 - [ ] Task list UI shows cron history
 - [ ] Developer has verified cron execution end-to-end

@@ -3,14 +3,15 @@
 ## Goal
 
 Build the monitoring dashboard showing status indicators for operational issues:
-bad show codes, blank questionnaires, and participant portal lockouts. Each
-indicator links to a remediation page.
+bad show codes, blank questionnaires, participant portal lockouts, Informix sync
+queue health, and stale pending-CEO records. Each indicator links to a
+remediation page.
 
 ## Routes
 
 | Route | Description |
 |---|---|
-| `/` | Dashboard with three status cards |
+| `/` | Dashboard with status cards |
 | `/pools/fix-show-codes` | Review and fix bad show/division codes |
 | `/pools/reset-questionnaire` | Reset blank qualification questionnaires |
 | `/pools/lockouts` | Participant portal lockout management |
@@ -19,7 +20,7 @@ indicator links to a remediation page.
 
 | Endpoint | Method | Description |
 |---|---|---|
-| `/api/dashboard/status` | GET | Count of bad codes, blank QQs, lockouts |
+| `/api/dashboard/status` | GET | Counts for all status cards |
 | `/api/pools/fix-show-codes` | GET | List pool members with bad show codes |
 | `/api/pools/fix-show-codes` | POST | Batch-fix bad show codes |
 | `/api/pools/reset-qq` | POST | Reset a blank questionnaire for one participant |
@@ -33,8 +34,9 @@ interface DashboardStatus {
   bad_show_codes: number;
   blank_questionnaires: number;
   portal_lockouts: number;
-  informix_sync_pending: number;  // green if 0, yellow with count if > 0
-  informix_sync_failed: number;   // green if 0, red with count if > 0
+  informix_sync_pending: number;   // green if 0, yellow with count if > 0
+  informix_sync_failed: number;    // green if 0, red with count if > 0
+  stale_pending_ceo: number;       // green if 0, yellow with count if > 0
 }
 
 interface BadShowCodeRow {
@@ -54,48 +56,56 @@ interface PortalLockoutRow {
 }
 ```
 
+## Status Cards
+
+| Card | Source | Green | Yellow | Red |
+|---|---|---|---|---|
+| Bad Show Codes | Informix | 0 | — | > 0 |
+| Blank Questionnaires | Informix | 0 | — | > 0 |
+| Portal Lockouts | Informix | 0 | — | > 0 |
+| Informix Sync Pending | PG `informix_sync_queue` | 0 | > 0 | — |
+| Sync Failures | PG `informix_sync_queue` | 0 | — | > 0 |
+| Stale CEO Records | PG `status_reviews.data_stale` | 0 | > 0 | — |
+
+**Stale CEO Records card:** Count of `status_reviews` rows where `data_stale = true`
+and `status = 'pending_ceo'`. Yellow when > 0. Clicking the card links to
+`/reviews/excuse` and `/reviews/disqualify` admin queues where the stale banner
+surfaces the affected records. There is no separate remediation page — the admin
+review screen is the remediation path (recall → reconcile → re-send).
+
 ## Chunks
 
 ### 2.1 Backend: Dashboard status API
 
-`GET /api/dashboard/status` — two sources:
+`GET /api/dashboard/status` — three sources:
 
 - Informix: counts of bad show codes, blank questionnaires, portal lockouts
-- PostgreSQL: `informix_sync_queue` counts by status
+- PostgreSQL `informix_sync_queue`: pending and failed counts
+- PostgreSQL `status_reviews`: count of `data_stale = true AND status = 'pending_ceo'`
 
 ```sql
+-- Sync queue counts
 SELECT
   COUNT(*) FILTER (WHERE status = 'pending') AS informix_sync_pending,
   COUNT(*) FILTER (WHERE status = 'failed')  AS informix_sync_failed
 FROM informix_sync_queue
 WHERE status != 'completed';
+
+-- Stale CEO records
+SELECT COUNT(*) AS stale_pending_ceo
+FROM status_reviews
+WHERE data_stale = true AND status = 'pending_ceo';
 ```
 
-**Verify:** Response matches expected counts from seed data.
-
-### 2.1a Dashboard sync status cards
-
-Two additional status cards below the existing three:
-
-| Card | Condition | Color |
-|---|---|---|
-| Informix Sync — N pending | pending = 0 | green |
-| Informix Sync — N pending | pending > 0 | yellow with count |
-| Sync Failures — N failed | failed = 0 | green |
-| Sync Failures — N failed | failed > 0 | red with count |
-
-Pending count gives visibility into queue depth (cron may not have run yet).
-Failed count is the actionable alert — clicking it opens a failure detail view
-showing the `last_error` and payload for each failed row.
-
-**Verify:** Cards update correctly as queue is populated and cleared.
+**Verify:** Response matches expected counts from seed data. Stale count is 0
+before the staleness cron has run.
 
 ### 2.2 Build dashboard page
 
-`/` — three status cards with count badges. Each badge is red when non-zero,
-green when clear. Cards link to respective remediation pages.
+`/` — six status cards in a grid. Colors per the table above. Stale CEO Records
+card links to the admin review queues.
 
-**Verify:** Counts display correctly. Colors change with data.
+**Verify:** All six cards render with correct counts and colors.
 
 ### 2.3 Backend: Bad show codes API
 
@@ -128,38 +138,42 @@ Confirmation modal before executing. Dashboard badge updates after fix.
 
 ### 2.7 Write E2E tests
 
-1. Dashboard loads with correct counts
-2. Bad codes list renders, fix action clears dashboard badge
-3. QQ reset executes, confirmation shown
-4. Lockout list renders, unlock action completes
+1. Dashboard loads with all six status cards showing correct counts
+2. Stale CEO Records card shows 0 initially; correct count after cron flags a record
+3. Bad codes list renders, fix action clears dashboard badge
+4. QQ reset executes, confirmation shown
+5. Lockout list renders, unlock action completes
+6. Stale card links navigate to correct admin review queues
 
 **Verify:** All tests pass.
 
 ## Implementation Status
 
 ### Backend
-- [x] `GET /api/dashboard/status` — bad show codes, blank QQs, portal lockouts, `informix_sync_pending`, `informix_sync_failed`
+- [x] `GET /api/dashboard/status` — bad show codes, blank QQs, portal lockouts, sync pending, sync failed
 - [x] `GET/POST /api/pools/fix-show-codes`
 - [x] `GET /api/pools/blank-questionnaires`
 - [x] `POST /api/pools/reset-qq`
 - [x] `GET /api/pools/lockouts`
 - [x] `POST /api/pools/unlock`
+- [ ] `stale_pending_ceo` count in dashboard status — not added (depends on Phase 7 schema changes)
 
 ### Frontend
-- [x] `/` — dashboard with status cards (bad codes, blank QQs, lockouts, sync pending, sync failed)
+- [x] `/` — dashboard with five status cards (bad codes, blank QQs, lockouts, sync pending, sync failed)
 - [x] `/pools/fix-show-codes`
 - [x] `/pools/reset-questionnaire`
 - [x] `/pools/lockouts`
-- [ ] Sync failure detail view (clicking failed count to see `last_error` / payload) — not built; use `/reviews/sync` instead
+- [ ] Stale CEO Records card — not built
+- [ ] Sync failure detail view — not built; use `/reviews/sync` instead
 
 ### Testing
 - [ ] `dashboard.test.ts` — not written
 
 ## Exit Criteria
 
-- [x] Dashboard shows correct status counts
-- [x] Each remediation action works end-to-end (fix show codes, reset QQ, unlock)
+- [x] Dashboard shows correct status counts for existing five cards
+- [x] Each remediation action works end-to-end
+- [ ] Stale CEO Records card added (depends on Phase 7 `data_stale` column)
 - [ ] Dashboard badges update after remediation (verify locally)
-- [ ] Sync failure detail view (or accepted substitute via `/reviews/sync`)
 - [ ] `dashboard.test.ts` Puppeteer tests written
 - [ ] Developer has verified each workflow
